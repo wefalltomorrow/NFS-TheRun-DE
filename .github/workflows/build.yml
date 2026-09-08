@@ -2,7 +2,7 @@ name: Build NFSTR Definitive Edition
 
 on:
   push:
-    branches: [main]
+    branches: [main, graphics-aa-lod-livery-loading]
   workflow_dispatch:
 
 permissions:
@@ -46,6 +46,8 @@ jobs:
             src/features/extra_ui.cpp \
             src/features/photo_mode.cpp \
             src/features/fps_unlocker.cpp \
+            src/features/loading_vsync.cpp \
+            src/features/anti_aliasing.cpp \
             src/features/track_rules.cpp \
             src/features/traffic.cpp \
             src/features/player_vehicle.cpp \
@@ -68,7 +70,7 @@ jobs:
       - name: Upload compiled ASI
         uses: actions/upload-artifact@v4
         with:
-          name: NFSTR_DefinitiveEdition
+          name: NFSTR_DefinitiveEdition-graphics-experimental
           path: |
             NFSTR_DefinitiveEdition.asi
             NFSTR_DefinitiveEdition.sha256.txt
