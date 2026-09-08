@@ -68,6 +68,12 @@ namespace Features {
     void InitFramerateUnlocker();
     void UpdateFramerateUnlocker();
 
+    // Temporary logging-only instrumentation for the controller mapping reset.
+    // Kept on the controller-mapping-diagnostic branch until the responsible
+    // load/reset path is identified.
+    void InitControllerMappingDiagnostics();
+    void UpdateControllerMappingDiagnostics();
+
     // Relaxes track rules (checkpoint timer, OOB reset, wrong-way respawn).
     // All INI-gated and OFF by default.
     void InitTrackRules();
