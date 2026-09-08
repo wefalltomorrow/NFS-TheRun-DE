@@ -25,7 +25,7 @@ namespace Config {
         g_Config.UnlockCutsceneFPS    = GetPrivateProfileIntA("GRAPHICS_FPS", "UnlockCutsceneFPS",   0,  iniPath);
         g_Config.ClampSimRateWhenNoControl = GetPrivateProfileIntA("GRAPHICS_FPS", "ClampSimRateWhenNoControl", 1, iniPath);
 
-        g_Config.AntiAliasing         = GetPrivateProfileIntA("GRAPHICS_QUALITY", "AntiAliasing", 2, iniPath);
+        g_Config.AntiAliasing         = GetPrivateProfileIntA("GRAPHICS_QUALITY", "AntiAliasing", 4, iniPath);
         g_Config.FastLoadingVSyncBypass = GetPrivateProfileIntA("GRAPHICS_QUALITY", "FastLoadingVSyncBypass", 1, iniPath);
         g_Config.ForceMeshLod         = GetPrivateProfileIntA("GRAPHICS_QUALITY", "ForceMeshLod", 0, iniPath);
         g_Config.MeshGlobalLodScale   = ReadIniFloat("GRAPHICS_QUALITY", "MeshGlobalLodScale", 1000.0f, iniPath);
@@ -89,7 +89,7 @@ namespace Config {
         Logger::Log("  AlwaysShowPhotoMode=%d", g_Config.AlwaysShowPhotoMode);
         Logger::Log("  EnableFramerateUnlocker=%d  ClampSimRateWhenNoControl=%d",
             g_Config.EnableFramerateUnlocker, g_Config.ClampSimRateWhenNoControl);
-        Logger::Log("  GraphicsQuality: AA=%d  FastLoadingVSyncBypass=%d  ForceMeshLod=%d  GlobalLodScale=%.1f  VinylTargetSize=%d",
+        Logger::Log("  GraphicsQuality: NativeMSAA=%dx  FastLoadingVSyncBypass=%d  ForceMeshLod=%d  GlobalLodScale=%.1f  VinylTargetSize=%d",
             g_Config.AntiAliasing, g_Config.FastLoadingVSyncBypass, g_Config.ForceMeshLod,
             g_Config.MeshGlobalLodScale, g_Config.VinylTargetSize);
         Logger::Log("  DisableCheckpointTimer=%d  DisableResetOOB=%d  DisableWrongWayRespawn=%d",
