@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
@@ -14,22 +14,6 @@ jobs:
     steps:
       - name: Checkout fork
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Apply known-good menu/cutscene FPS fix
-        run: python3 tools/apply_known_good_fps_fix.py
-
-      - name: Commit migrated source when needed
-        shell: bash
-        run: |
-          if ! git diff --quiet -- src/features/fps_unlocker.cpp; then
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add src/features/fps_unlocker.cpp
-            git commit -m "Fix menu/cutscene FPS without changing gameplay [skip ci]"
-            git push origin HEAD:main
-          fi
 
       - name: Verify FPS timing scope
         shell: bash
