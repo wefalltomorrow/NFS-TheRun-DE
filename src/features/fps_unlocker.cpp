@@ -8,8 +8,11 @@ extern "C" {
     uint32_t* g_pSimTickEnable = nullptr;
     uintptr_t g_pGameTimeReturn = 0;
 
-    // Captured pointer to the PlayerHasVehicleControl byte (game sets/clears it).
+    // Keep the original captured pointer for existing DE features that use it,
+    // but fps_unlocker.cpp itself consumes the hook-time value below.
     uint8_t* g_pHasControl = nullptr;
+    volatile uint32_t g_ControlSampleCounter = 0;
+    volatile uint8_t  g_ControlSampleValue = 0;
     uintptr_t g_pControlReturn = 0;       // return addr for the direct (unhooked-site) path
     uintptr_t g_pControlChainTarget = 0;  // existing hook's stub, for the coexist path
 
@@ -37,10 +40,13 @@ asm(
     ".text\n"
     ".globl _ControlCheckHookAsm\n"
     "_ControlCheckHookAsm:\n"
-    "    pushl %ebx\n"
-    "    leal 0x04(%esi), %ebx\n"
-    "    movl %ebx, _g_pHasControl\n"
-    "    popl %ebx\n"
+    "    pushl %eax\n"
+    "    leal 0x04(%esi), %eax\n"
+    "    movl %eax, _g_pHasControl\n"
+    "    movzbl 0x04(%esi), %eax\n"
+    "    movb %al, _g_ControlSampleValue\n"
+    "    incl _g_ControlSampleCounter\n"
+    "    popl %eax\n"
     "    cmpb $0x00, 0x04(%esi)\n"   // stolen: cmp byte ptr [esi+04],00
     "    pushl %edi\n"               // stolen: push edi
     "    jmpl *_g_pControlReturn\n"
@@ -54,23 +60,23 @@ asm(
     ".text\n"
     ".globl _ControlChainHookAsm\n"
     "_ControlChainHookAsm:\n"
+    "    pushfl\n"
     "    pushl %eax\n"
     "    leal 0x04(%esi), %eax\n"
     "    movl %eax, _g_pHasControl\n"
+    "    movzbl 0x04(%esi), %eax\n"
+    "    movb %al, _g_ControlSampleValue\n"
+    "    incl _g_ControlSampleCounter\n"
     "    popl %eax\n"
+    "    popfl\n"
     "    jmpl *_g_pControlChainTarget\n"
 );
 
 static bool g_LogCapturedHook = false;
 static bool g_LogCapturedControl = false;
 static int  g_LastControlState = -1;   // -1 unknown, 0 no control, 1 has control
-static bool g_WarnedStaleControl = false;
+static uint32_t g_LastControlSampleCounter = 0;
 static bool g_WarnedCutsceneConflict = false;
-
-// True while the control byte is unreadable garbage. The clamp can safely hold
-// its last known state through this; the cutscene unlock CANNOT, and must fail
-// closed instead. See the note at the tick write.
-static bool g_ControlReadStale = false;
 
 // When the no-control window began, for the cutscene-unlock dwell below.
 static DWORD g_NoControlSince = 0;
@@ -224,66 +230,38 @@ namespace Features {
         // Apply target FPS Limit
         float targetFps = (g_Config.FPSLimit == -1) ? 1000.0f : static_cast<float>(g_Config.FPSLimit);
 
-        // Sim-rate clamp: when the player has no vehicle control (QTE / cutscene),
-        // pull the sim rate back to 30 so hardcoded-30fps timers behave correctly.
-        // The control state is read whether or not the clamp is enabled, because
-        // the render settings gate the FOV override on it too.
-        if (g_pHasControl) {
-            uint8_t ctlByte = *g_pHasControl;
+        // Sim-rate clamp / cutscene state detection. Preserve the original DE
+        // policy, but consume the bool sampled synchronously by the hook. The old
+        // code dereferenced g_pHasControl here after the owning object could have
+        // been freed/reused; a reused 0/1 byte looked valid and could leave the
+        // FPS logic stuck in the wrong state.
+        const uint32_t sampleCounter = g_ControlSampleCounter;
+        if (sampleCounter != g_LastControlSampleCounter) {
+            g_LastControlSampleCounter = sampleCounter;
+            const uint8_t ctlByte = g_ControlSampleValue ? 1u : 0u;
 
             if (!g_LogCapturedControl) {
-                Logger::Log("Control-check hook active: PlayerHasVehicleControl byte at 0x%08X (initial value %u)",
-                            reinterpret_cast<uintptr_t>(g_pHasControl), ctlByte);
+                Logger::Log("Control-check hook active: PlayerHasVehicleControl sampled by value (initial value %u)",
+                            ctlByte);
                 g_LogCapturedControl = true;
             }
 
-            // The byte is a bool, so anything other than 0 or 1 means the pointer
-            // has gone stale: it aims into an object that has since been freed and
-            // its memory handed to something else. Treating a stale read as truth
-            // is worse than ignoring it — a garbage nonzero byte reads as "driving"
-            // and would release the sim-rate clamp in the middle of a cutscene,
-            // which is exactly what the clamp exists to prevent. The last known
-            // good state is held until the hook fires again and re-captures.
-            if (ctlByte > 1) {
-                g_ControlReadStale = true;
-                if (!g_WarnedStaleControl) {
-                    Logger::Log("Vehicle control: byte at 0x%08X read %u, which is not a bool. "
-                                "The object it points at was freed and reused. Holding the last "
-                                "known state until the hook re-captures.",
-                                reinterpret_cast<uintptr_t>(g_pHasControl), ctlByte);
-                    g_WarnedStaleControl = true;
+            const int hasControl = ctlByte ? 1 : 0;
+            if (hasControl != g_LastControlState) {
+                const char* effect;
+                if (hasControl) {
+                    effect = "driving, target framerate";
+                } else if (g_Config.UnlockCutsceneFPS) {
+                    effect = "no control, menu/cutscene dwell started";
+                } else if (g_Config.ClampSimRateWhenNoControl) {
+                    effect = "no control, clamping to 30";
+                } else {
+                    effect = "no control, sim rate left alone";
                 }
-            } else {
-                int hasControl = (ctlByte != 0) ? 1 : 0;
-                if (hasControl != g_LastControlState) {
-                    // Report what will actually happen, not what the clamp would
-                    // do if it were on. These three settings produce three
-                    // different responses to the same transition.
-                    const char* effect;
-                    if (hasControl) {
-                        effect = "driving, fixed sim step at the target framerate";
-                    } else if (g_Config.UnlockCutsceneFPS) {
-                        effect = "no control, unlocking (variable sim tick on)";
-                    } else if (g_Config.ClampSimRateWhenNoControl) {
-                        effect = "no control, clamping to 30";
-                    } else {
-                        effect = "no control, sim rate left alone";
-                    }
-                    Logger::Log("Vehicle control changed: PlayerHasVehicleControl=%u -> %s.",
-                                ctlByte, effect);
-                    g_LastControlState = hasControl;
-                    // Restart the dwell on every entry into no-control, so a crash
-                    // that briefly drops control cannot inherit a cutscene's credit.
-                    if (!hasControl) g_NoControlSince = GetTickCount();
-                }
-                // Coming back from a stale run restarts the dwell. The state may
-                // have read "no control" the whole time it was garbage, and that
-                // stretch should not count as a cutscene that has proven itself.
-                if (g_ControlReadStale) {
-                    g_NoControlSince = GetTickCount();
-                    g_ControlReadStale = false;
-                }
-                g_WarnedStaleControl = false;
+                Logger::Log("Vehicle control changed: PlayerHasVehicleControl=%u -> %s.",
+                            ctlByte, effect);
+                g_LastControlState = hasControl;
+                if (!hasControl) g_NoControlSince = GetTickCount();
             }
         }
 
@@ -321,7 +299,6 @@ namespace Features {
         // prevent. So an untrustworthy read forces the fixed step, and the unlock
         // resumes only once the byte reads as a bool again.
         const bool dwellMet = noControl
-                           && !g_ControlReadStale
                            && (GetTickCount() - g_NoControlSince) >= kCutsceneDwellMs;
         const bool cutsceneUnlock = g_Config.UnlockCutsceneFPS && dwellMet;
 
@@ -350,22 +327,23 @@ namespace Features {
             *pMaxVariableFps = targetFps;
         }
 
-        // The field is only ever written when the option is on, and it is driven
-        // back to 0 the moment control returns rather than left set. An earlier
-        // version set it once and never cleared it, which is why enabling this
-        // used to break driving: the whole game ran on a variable step from the
-        // first cutscene onwards. Writing it unconditionally is also avoided, so
-        // with the option off the game owns the field exactly as it always did.
+        // Preserve the pre-Aug-11 DE gameplay path. On the tested v1.1/FusionFix
+        // setup, forcing VariableSimTickEnable back to 0 during driving makes actual
+        // gameplay render at 30 FPS even when MaxVariableFps is the configured target.
+        // The older DE behavior kept this field enabled and gameplay ran correctly.
+        // Keep that proven behavior; the 1500 ms dwell above only distinguishes
+        // short no-control windows from longer menu/cutscene windows for
+        // MaxVariableFps. No other GameTime timing field is modified.
         if (g_Config.UnlockCutsceneFPS) {
-            const uint32_t want = cutsceneUnlock ? 1u : 0u;
-            if (*g_pSimTickEnable != want) {
-                *g_pSimTickEnable = want;
+            if (*g_pSimTickEnable != 1u) {
+                *g_pSimTickEnable = 1u;
             }
             if (!g_WarnedCutsceneConflict) {
-                Logger::Log("UnlockCutsceneFPS is ON: the variable sim tick is enabled only after "
-                            "%lu ms without vehicle control, so driving and crash physics keep "
-                            "their fixed 30 Hz step. QTE prompts run at the target framerate and "
-                            "time out faster.", static_cast<unsigned long>(kCutsceneDwellMs));
+                Logger::Log("UnlockCutsceneFPS is ON: preserving pre-Aug-11 DE gameplay timing "
+                            "(VariableSimTickEnable=1). MaxVariableFps stays at the configured "
+                            "target while driving; short no-control windows remain at 30 and "
+                            "long menu/cutscene windows return to target after %lu ms.",
+                            static_cast<unsigned long>(kCutsceneDwellMs));
                 g_WarnedCutsceneConflict = true;
             }
         }
