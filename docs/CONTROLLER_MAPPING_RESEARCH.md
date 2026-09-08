@@ -64,13 +64,14 @@ The custom and reset blocks differ structurally as well as in individual binding
 ## Executable targets
 The v1.1 executable contains both `OnInputDeviceChanged` and `Vehicle Inputs` in the same input/profile subsystem.
 
-Known xrefs in the tested executable:
-- `OnInputDeviceChanged` string is dispatched from code around `0x00927133`.
-- `Vehicle Inputs` is referenced by small wrappers at `0x00927140`, `0x00927150`, and `0x00927160`.
-- `0x00927150` is called from at least `0x008786BF` and `0x00882C5E`.
-- `0x00927160` is called from at least `0x00882CBE`.
-
-The exact semantics of those three wrappers still need to be named (load/save/reset/dirty-state etc.), so they should be instrumented before patching behavior.
+Known code in the tested executable:
+- `OnInputDeviceChanged` is dispatched at `0x00927133`.
+- `Vehicle Inputs` wrapper A is `0x00927140` and is also the profile object's vtable slot `+0x28`.
+- wrapper B is `0x00927150`.
+- wrapper C is `0x00927160` and begins by setting byte `[ecx+0x4E] = 1`.
+- the surrounding input-state updater is `0x009270A0`; it tracks a state field at object offset `+0x3C` and a global device flag at `0x0289227E`.
+- when state changes between 2 and 3 it dispatches event/hash `0x4BB4E56D` at `0x009270DC`.
+- when the updater resets state to 0 it reaches the literal `OnInputDeviceChanged` dispatch at `0x00927133`.
 
 ## First diagnostic run: mappings stayed correct
 A first logging-only ASI run was made with the custom save present. The mappings **remained correct** on that launch.
@@ -80,27 +81,40 @@ Observed wrapper activity during the run:
 - wrapper B (`0x00927150`): 1 entry;
 - wrapper C (`0x00927160`): 0 entries.
 
-The initial diagnostic also hooked `0x009270A0` as a nearby input-device-change candidate. That site fired about 2,900 times in roughly 49 seconds, proving it is a hot path rather than a useful one-shot device-change signal. Because the persistence bug is timing-sensitive and normally reproduces on most launches, instrumentation of such a hot path could itself change startup timing and mask the reset.
+The initial diagnostic also hooked `0x009270A0` as a nearby input-device-change candidate. That site fired about 2,900 times in roughly 49 seconds, proving the function itself is a hot updater rather than a useful one-shot signal. Logging that hot path was removed after this run.
 
-That hot-path hook has therefore been removed from the second diagnostic build. Diagnostic v2 instruments only wrappers A/B/C and also snapshots each wrapper's `ECX` object pointer and caller return address. This should substantially reduce timing perturbation while giving more useful caller information.
+## Second diagnostic run: mappings reset
+Diagnostic v2 removed the hot-path hook and instrumented only A/B/C, including caller return addresses. The mappings reset on this launch.
+
+Observed sequence:
+1. wrapper A, caller `0x00866727`;
+2. wrapper B, caller `0x00882C63` (direct call at `0x00882C5E`);
+3. wrapper A, caller `0x00882C95` (vtable call returning at that address);
+4. wrapper A again, caller `0x00866727`.
+
+All four calls used the same profile object during the run. Wrapper C again never ran.
+
+This rules out the simple theory that wrapper C is the operation that resets the mappings. A and B participate in the lifecycle, but their presence/count alone is not enough to distinguish a good launch from a reset launch: the first good run showed the same aggregate A=3, B=1, C=0 pattern.
+
+The call sites around `0x00882C40`, `0x00882C70`, and `0x00882CA0` form three small profile/event handlers. The B path calls wrapper B directly; the middle path invokes wrapper A through the profile object's vtable slot `+0x28`; the C path would call wrapper C but did not execute in either captured run.
 
 ## Current conclusion
-The strongest working theory remains a **startup/device-initialization overwrite**, but the successful first diagnostic launch also raises a stronger possibility that this is a race/timing bug:
+The strongest working theory remains a **startup/device-initialization race/overwrite**:
 
 1. profile load restores the desired `Vehicle Inputs` data;
-2. controller/device initialization sometimes races with that load or with a later default-binding rebuild;
-3. on bad launches, the default block wins and is later written back to `PROF_SAVE_body`;
-4. on good launches, the custom block survives.
+2. controller/device initialization can rebuild the live vehicle bindings from defaults;
+3. on bad launches the default state wins and is later serialized back through the normal profile lifecycle;
+4. on good launches the custom state survives.
 
-Because both snapshots have valid game-generated checksums and the header is unchanged, manually hex-editing the save is not the preferred fix.
+Because the reset run does not uniquely differ in A/B/C call counts, the next useful discriminator is the actual device-state transition path rather than another wrapper-only count.
 
-## Next diagnostic / fix direction
-Use the low-impact wrapper-only diagnostic repeatedly until both a good and a reset launch are captured. Compare:
-- which of wrappers A/B/C fired;
-- their order/count;
-- caller return addresses;
-- object (`ECX`) addresses.
+## Diagnostic v3
+Diagnostic v3 keeps A/B/C instrumentation and adds hooks only at two cold event sites inside the otherwise-hot input updater:
+- `0x009270DC`: state-2/3 transition event; logs resulting `+0x3C` state and global device flag;
+- `0x00927133`: actual `OnInputDeviceChanged` dispatch; logs state and device flag.
 
-The preferred permanent fix is generic: preserve the profile-loaded `Vehicle Inputs` block across device initialization, rather than hardcoding one user's button mappings or continuously rewriting the save file.
+It deliberately does **not** log every call to `0x009270A0`.
+
+The preferred permanent fix remains generic: preserve the profile-loaded `Vehicle Inputs` state across the incorrect startup device transition/rebuild once that transition is identified. Do not hardcode one user's button mappings and do not continuously rewrite the save file.
 
 Keep this fix separate from the framerate code.
