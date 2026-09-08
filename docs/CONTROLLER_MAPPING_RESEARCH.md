@@ -72,17 +72,34 @@ Known xrefs in the tested executable:
 
 The exact semantics of those three wrappers still need to be named (load/save/reset/dirty-state etc.), so they should be instrumented before patching behavior.
 
+## First diagnostic run: mappings stayed correct
+A first logging-only ASI run was made with the custom save present. The mappings **remained correct** on that launch.
+
+Observed wrapper activity during the run:
+- wrapper A (`0x00927140`): 3 entries;
+- wrapper B (`0x00927150`): 1 entry;
+- wrapper C (`0x00927160`): 0 entries.
+
+The initial diagnostic also hooked `0x009270A0` as a nearby input-device-change candidate. That site fired about 2,900 times in roughly 49 seconds, proving it is a hot path rather than a useful one-shot device-change signal. Because the persistence bug is timing-sensitive and normally reproduces on most launches, instrumentation of such a hot path could itself change startup timing and mask the reset.
+
+That hot-path hook has therefore been removed from the second diagnostic build. Diagnostic v2 instruments only wrappers A/B/C and also snapshots each wrapper's `ECX` object pointer and caller return address. This should substantially reduce timing perturbation while giving more useful caller information.
+
 ## Current conclusion
-The strongest working theory is now a **startup/device-initialization overwrite**:
+The strongest working theory remains a **startup/device-initialization overwrite**, but the successful first diagnostic launch also raises a stronger possibility that this is a race/timing bug:
 
 1. profile load restores the desired `Vehicle Inputs` data;
-2. controller/device initialization or `OnInputDeviceChanged` rebuilds the active vehicle bindings from defaults on most launches;
-3. the rebuilt/default block is later written back to `PROF_SAVE_body` with a valid new body checksum.
+2. controller/device initialization sometimes races with that load or with a later default-binding rebuild;
+3. on bad launches, the default block wins and is later written back to `PROF_SAVE_body`;
+4. on good launches, the custom block survives.
 
 Because both snapshots have valid game-generated checksums and the header is unchanged, manually hex-editing the save is not the preferred fix.
 
 ## Next diagnostic / fix direction
-Instrument the `Vehicle Inputs` wrappers and/or the input-device-change path to identify which call replaces the loaded custom block during startup.
+Use the low-impact wrapper-only diagnostic repeatedly until both a good and a reset launch are captured. Compare:
+- which of wrappers A/B/C fired;
+- their order/count;
+- caller return addresses;
+- object (`ECX`) addresses.
 
 The preferred permanent fix is generic: preserve the profile-loaded `Vehicle Inputs` block across device initialization, rather than hardcoding one user's button mappings or continuously rewriting the save file.
 
