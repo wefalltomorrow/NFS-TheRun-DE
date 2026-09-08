@@ -30,7 +30,7 @@ struct ConfigStruct {
     // Defaults are ON for the graphics test branch so an existing INI can test
     // the build without needing new keys. Every option can still be disabled
     // independently by adding it to the INI.
-    int AntiAliasing = 2;              // 0 off, 1 FXAA, 2 high-quality FXAA
+    int AntiAliasing = 4;              // native Frostbite MSAA: 0 off, 2/4/8 samples
     int FastLoadingVSyncBypass = 1;    // port of mRally2's hardcoded VSync bypass
     int ForceMeshLod = 0;              // -1 engine choice, 0 highest LOD, 1+ lower LODs
     float MeshGlobalLodScale = 1000.0f;// pushes normal LOD transitions far away
@@ -96,8 +96,8 @@ struct ConfigStruct {
 
     // [WORLDRENDER] — fb::WorldRenderSettings. Resolved through the settings
     // manager, not a static pointer. -1 means "leave the engine's own value".
-    // Only the shadow settings are here: motion blur, native MSAA and the cascade
-    // slice count were all tested and have no effect in the retail build.
+    // Only the shadow settings are here. The standalone MultisampleCount test was
+    // inconclusive; native MSAA is now tested separately with its shader-system gate.
     int EnableWorldRenderTweaks = 0;
     int ShadowmapResolution = -1;        // 2048 at the game's highest preset
     int ShadowmapQuality = -1;           // stock 1; 0 or 2 disable the filtering
