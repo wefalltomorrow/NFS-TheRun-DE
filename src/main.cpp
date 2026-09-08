@@ -41,9 +41,9 @@ DWORD WINAPI MainThread(LPVOID /*lpParam*/) {
     Features::InitTodRandomizer();
     Features::InitGinsuDiagnostics();
 
-    // Graphics-quality hooks are kept completely separate from GameTime. The
-    // loading patch modifies only the game's hardcoded VSync display routine and
-    // the AA hook operates on the final D3D11 back buffer at Present.
+    // Graphics-quality work stays completely separate from GameTime. The loading
+    // patch modifies only the game's hardcoded VSync display routine. Native MSAA
+    // uses Frostbite's own renderer settings; no Present/post-process hook exists.
     Features::InitLoadingVSyncOptimization();
     Features::InitAntiAliasing();
 
@@ -64,6 +64,7 @@ DWORD WINAPI MainThread(LPVOID /*lpParam*/) {
         Features::UpdateTodRandomizer();
         Features::UpdateDifficultyText();
         Features::UpdatePlayerVehicle();  // reads that decision, so it runs after
+        Features::UpdateAntiAliasing();   // containers may reset/recreate on load
         Features::UpdateRenderSettings();
         Features::UpdateSettingsProbe();
         Sleep(16); // ~60 Hz tick
