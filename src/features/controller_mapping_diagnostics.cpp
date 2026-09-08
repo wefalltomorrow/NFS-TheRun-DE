@@ -4,52 +4,58 @@
 #include <windows.h>
 #include <cstdint>
 
-// Logging-only instrumentation for the controller-mapping persistence bug.
-// This deliberately does not modify profile/input behavior.  It counts entries
-// into the three small "Vehicle Inputs" wrappers and the nearby input-device
-// change path so a real startup log can tell us which operation runs when the
-// saved custom bindings are replaced by defaults.
+// Low-impact, logging-only instrumentation for the controller-mapping
+// persistence bug.
+//
+// The first diagnostic build also hooked exe+0x5270A0 because it sits near the
+// OnInputDeviceChanged-related code. A good-mapping run proved that site is a
+// hot path (thousands of entries in under a minute), so hooking/logging it was
+// both noisy and capable of perturbing startup timing. That hook is deliberately
+// gone here.
+//
+// We now instrument only the three tiny helpers that directly reference the
+// "Vehicle Inputs" profile property. Besides a count, each hook snapshots ECX
+// and the caller return address so a good-vs-reset run can identify which helper
+// and call site participates in the overwrite.
 
 extern "C" {
-    volatile uint32_t g_InputDiagDeviceChangedCount = 0;
     volatile uint32_t g_InputDiagVehicleA_Count = 0;
     volatile uint32_t g_InputDiagVehicleB_Count = 0;
     volatile uint32_t g_InputDiagVehicleC_Count = 0;
 
-    uintptr_t g_InputDiagDeviceChangedReturn = 0;
+    volatile uintptr_t g_InputDiagVehicleA_This = 0;
+    volatile uintptr_t g_InputDiagVehicleB_This = 0;
+    volatile uintptr_t g_InputDiagVehicleC_This = 0;
+
+    volatile uintptr_t g_InputDiagVehicleA_Caller = 0;
+    volatile uintptr_t g_InputDiagVehicleB_Caller = 0;
+    volatile uintptr_t g_InputDiagVehicleC_Caller = 0;
+
     uintptr_t g_InputDiagVehicleA_Return = 0;
     uintptr_t g_InputDiagVehicleB_Return = 0;
     uintptr_t g_InputDiagVehicleC_Return = 0;
     uintptr_t g_InputDiagVehicleInputsName = 0;
 
-    void InputDiagDeviceChangedHookAsm();
     void InputDiagVehicleA_HookAsm();
     void InputDiagVehicleB_HookAsm();
     void InputDiagVehicleC_HookAsm();
 }
 
-// exe+0x5270A0 (absolute 0x009270A0 at the stock 0x00400000 base)
-// Stolen bytes: push esi ; mov esi,ecx ; mov eax,[esi+3C]
-asm(
-    ".text\n"
-    ".globl _InputDiagDeviceChangedHookAsm\n"
-    "_InputDiagDeviceChangedHookAsm:\n"
-    "    pushfl\n"
-    "    incl _g_InputDiagDeviceChangedCount\n"
-    "    popfl\n"
-    "    pushl %esi\n"
-    "    movl %ecx, %esi\n"
-    "    movl 0x3c(%esi), %eax\n"
-    "    jmpl *_g_InputDiagDeviceChangedReturn\n"
-);
-
+// At entry, [esp] is the caller return address. Preserve flags/EAX while
+// snapshotting caller + ECX, then replay the stolen instruction.
+//
 // exe+0x527140. Stolen bytes: push 0x024832F4 ("Vehicle Inputs")
 asm(
     ".text\n"
     ".globl _InputDiagVehicleA_HookAsm\n"
     "_InputDiagVehicleA_HookAsm:\n"
     "    pushfl\n"
+    "    pushl %eax\n"
+    "    movl %ecx, _g_InputDiagVehicleA_This\n"
+    "    movl 8(%esp), %eax\n"
+    "    movl %eax, _g_InputDiagVehicleA_Caller\n"
     "    incl _g_InputDiagVehicleA_Count\n"
+    "    popl %eax\n"
     "    popfl\n"
     "    pushl _g_InputDiagVehicleInputsName\n"
     "    jmpl *_g_InputDiagVehicleA_Return\n"
@@ -61,7 +67,12 @@ asm(
     ".globl _InputDiagVehicleB_HookAsm\n"
     "_InputDiagVehicleB_HookAsm:\n"
     "    pushfl\n"
+    "    pushl %eax\n"
+    "    movl %ecx, _g_InputDiagVehicleB_This\n"
+    "    movl 8(%esp), %eax\n"
+    "    movl %eax, _g_InputDiagVehicleB_Caller\n"
     "    incl _g_InputDiagVehicleB_Count\n"
+    "    popl %eax\n"
     "    popfl\n"
     "    pushl _g_InputDiagVehicleInputsName\n"
     "    jmpl *_g_InputDiagVehicleB_Return\n"
@@ -74,7 +85,12 @@ asm(
     ".globl _InputDiagVehicleC_HookAsm\n"
     "_InputDiagVehicleC_HookAsm:\n"
     "    pushfl\n"
+    "    pushl %eax\n"
+    "    movl %ecx, _g_InputDiagVehicleC_This\n"
+    "    movl 8(%esp), %eax\n"
+    "    movl %eax, _g_InputDiagVehicleC_Caller\n"
     "    incl _g_InputDiagVehicleC_Count\n"
+    "    popl %eax\n"
     "    popfl\n"
     "    movb $0x01, 0x4e(%ecx)\n"
     "    pushl _g_InputDiagVehicleInputsName\n"
@@ -83,7 +99,6 @@ asm(
 
 namespace {
     bool g_Installed = false;
-    uint32_t g_LastDeviceChanged = 0;
     uint32_t g_LastVehicleA = 0;
     uint32_t g_LastVehicleB = 0;
     uint32_t g_LastVehicleC = 0;
@@ -110,14 +125,10 @@ namespace Features {
         uintptr_t base = Memory::GetGameBase();
         g_InputDiagVehicleInputsName = base + 0x20832F4;
 
-        const uint8_t deviceExpected[6] = { 0x56, 0x8B, 0xF1, 0x8B, 0x46, 0x3C };
         const uint8_t vehicleExpected[5] = { 0x68, 0xF4, 0x32, 0x48, 0x02 };
         const uint8_t vehicleCExpected[9] = { 0xC6, 0x41, 0x4E, 0x01, 0x68, 0xF4, 0x32, 0x48, 0x02 };
 
         bool ok = true;
-        ok &= InstallOne(base + 0x5270A0, deviceExpected, sizeof(deviceExpected),
-                         reinterpret_cast<uintptr_t>(InputDiagDeviceChangedHookAsm),
-                         g_InputDiagDeviceChangedReturn, "input-device-change path");
         ok &= InstallOne(base + 0x527140, vehicleExpected, sizeof(vehicleExpected),
                          reinterpret_cast<uintptr_t>(InputDiagVehicleA_HookAsm),
                          g_InputDiagVehicleA_Return, "Vehicle Inputs wrapper A");
@@ -129,40 +140,39 @@ namespace Features {
                          g_InputDiagVehicleC_Return, "Vehicle Inputs wrapper C");
 
         g_Installed = ok;
-        Logger::Log("[INPUT-DIAG] Controller mapping diagnostics %s. Logging only; no input/profile behavior is changed.",
+        Logger::Log("[INPUT-DIAG] Controller mapping diagnostics %s. Low-impact logging only; no input/profile behavior is changed.",
                     ok ? "armed" : "partially armed");
     }
 
     void UpdateControllerMappingDiagnostics() {
-        if (!g_Installed && g_InputDiagDeviceChangedCount == 0 &&
-            g_InputDiagVehicleA_Count == 0 && g_InputDiagVehicleB_Count == 0 &&
-            g_InputDiagVehicleC_Count == 0) {
+        if (!g_Installed && g_InputDiagVehicleA_Count == 0 &&
+            g_InputDiagVehicleB_Count == 0 && g_InputDiagVehicleC_Count == 0) {
             return;
         }
 
-        uint32_t nowDevice = g_InputDiagDeviceChangedCount;
-        uint32_t nowA = g_InputDiagVehicleA_Count;
-        uint32_t nowB = g_InputDiagVehicleB_Count;
-        uint32_t nowC = g_InputDiagVehicleC_Count;
+        const uint32_t nowA = g_InputDiagVehicleA_Count;
+        const uint32_t nowB = g_InputDiagVehicleB_Count;
+        const uint32_t nowC = g_InputDiagVehicleC_Count;
 
-        if (nowDevice != g_LastDeviceChanged) {
-            Logger::Log("[INPUT-DIAG] input-device-change path entered: count %u -> %u",
-                        g_LastDeviceChanged, nowDevice);
-            g_LastDeviceChanged = nowDevice;
-        }
         if (nowA != g_LastVehicleA) {
-            Logger::Log("[INPUT-DIAG] Vehicle Inputs wrapper A entered: count %u -> %u",
-                        g_LastVehicleA, nowA);
+            Logger::Log("[INPUT-DIAG] Vehicle Inputs wrapper A: count %u -> %u, this=0x%08X caller=0x%08X",
+                        g_LastVehicleA, nowA,
+                        static_cast<unsigned>(g_InputDiagVehicleA_This),
+                        static_cast<unsigned>(g_InputDiagVehicleA_Caller));
             g_LastVehicleA = nowA;
         }
         if (nowB != g_LastVehicleB) {
-            Logger::Log("[INPUT-DIAG] Vehicle Inputs wrapper B entered: count %u -> %u",
-                        g_LastVehicleB, nowB);
+            Logger::Log("[INPUT-DIAG] Vehicle Inputs wrapper B: count %u -> %u, this=0x%08X caller=0x%08X",
+                        g_LastVehicleB, nowB,
+                        static_cast<unsigned>(g_InputDiagVehicleB_This),
+                        static_cast<unsigned>(g_InputDiagVehicleB_Caller));
             g_LastVehicleB = nowB;
         }
         if (nowC != g_LastVehicleC) {
-            Logger::Log("[INPUT-DIAG] Vehicle Inputs wrapper C entered: count %u -> %u",
-                        g_LastVehicleC, nowC);
+            Logger::Log("[INPUT-DIAG] Vehicle Inputs wrapper C: count %u -> %u, this=0x%08X caller=0x%08X",
+                        g_LastVehicleC, nowC,
+                        static_cast<unsigned>(g_InputDiagVehicleC_This),
+                        static_cast<unsigned>(g_InputDiagVehicleC_Caller));
             g_LastVehicleC = nowC;
         }
     }
