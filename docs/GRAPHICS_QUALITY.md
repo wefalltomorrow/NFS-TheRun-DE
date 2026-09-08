@@ -8,7 +8,7 @@ This branch keeps the known-good framerate/GameTime implementation unchanged and
 
 ```ini
 [GRAPHICS_QUALITY]
-AntiAliasing = 2
+AntiAliasing = 4
 FastLoadingVSyncBypass = 1
 ForceMeshLod = 0
 MeshGlobalLodScale = 1000
@@ -17,13 +17,25 @@ VinylTargetSize = 4096
 
 The experimental branch uses those values as defaults even when the section is absent, so an existing INI can be used unchanged for the first test.
 
-### AntiAliasing
+### AntiAliasing — native Frostbite MSAA
 
-- `0` = off
-- `1` = FXAA
-- `2` = higher-quality/wider FXAA search
+- `0` = off / leave the game's AA path alone
+- `2` = request native 2x MSAA
+- `4` = request native 4x MSAA (experimental branch default)
+- `8` = request native 8x MSAA
 
-The game's reflected `WorldRenderSettings.MultisampleCount` field was already wired up and tested by the upstream project and has no visible effect in the retail renderer. This option therefore does **not** pretend to enable native MSAA. It hooks the D3D11 swap-chain `Present` path and performs a real post-process FXAA pass on the final back buffer.
+There is **no FXAA, SMAA or other post-process AA in this branch**.
+
+Earlier upstream testing wrote only `WorldRenderSettings::MultisampleCount` (`+0xB8`) and saw no visible change. That proves the sample-count field alone is insufficient; it does not prove Frostbite's native MSAA path is absent. Anisotropic filtering is a sampler-state change and can be changed live, whereas MSAA requires the renderer to create and use multisampled color/depth resources and resolve them.
+
+The exact NFS The Run v1.1 executable still contains the native infrastructure: `DxMultisampleEnable`, `MultisampleCount`, `mainTextureMsaa`, `depthTextureMsaa2x/4x/8x`, MSAA resolve programs and sample-count-specific depth shader programs. It also contains live code that reads `ShaderSystemSettings::DxMultisampleEnable` at `+0x102`.
+
+This experiment therefore keeps **both** of these Frostbite settings enabled:
+
+- `WorldRenderSettings::MultisampleCount` at `+0xB8`
+- `ShaderSystemSettings::DxMultisampleEnable` at `+0x102`
+
+Both are reapplied when the settings containers become available because the renderer can recreate/reset them during level transitions. If both settings are accepted in the log but the actual render targets remain single-sampled, the next research target is the native render-target creation / `AntiAliasingDeferred` path rather than falling back to post-process AA.
 
 ### FastLoadingVSyncBypass
 
@@ -53,4 +65,4 @@ Frostbite `WorldRenderSettings::VinylTargetSize` is an int32 at `+0x90`. The bra
 
 ## Test priorities
 
-Watch for GPU-memory/performance cost, excessive distant object detail, livery clarity outside the garage, loading-time changes, and any overlay/UI softness introduced by the final-frame FXAA pass. The features remain on this branch until each one is validated independently.
+For MSAA, first verify the log reports both `MultisampleCount -> 4` and `DxMultisampleEnable -> 1`, then load a new event and compare geometry edges. Also watch GPU-memory/performance cost, excessive distant object detail, livery clarity outside the garage, loading-time changes and any VSync/presentation side effects. The features remain on this branch until each one is validated independently.
