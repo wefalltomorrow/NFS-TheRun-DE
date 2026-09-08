@@ -71,6 +71,7 @@ namespace Features {
     // Experimental graphics-quality work. These are deliberately independent
     // from the framerate/GameTime code.
     void InitAntiAliasing();
+    void UpdateAntiAliasing();
     void InitLoadingVSyncOptimization();
 
     // Relaxes track rules (checkpoint timer, OOB reset, wrong-way respawn).
