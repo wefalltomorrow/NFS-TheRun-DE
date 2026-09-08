@@ -41,12 +41,14 @@ DWORD WINAPI MainThread(LPVOID /*lpParam*/) {
     Features::InitTodRandomizer();
     Features::InitGinsuDiagnostics();
     Features::InitFramerateUnlocker();
+    Features::InitControllerMappingDiagnostics();
 
     Logger::Log("All features initialized successfully.");
 
     // 4. Background Ticker Loop
     while (true) {
         Features::UpdateFramerateUnlocker();
+        Features::UpdateControllerMappingDiagnostics();
         Features::UpdateParticleFix();
         Features::UpdateDifficulty();     // decides whether the mode is engaged
         Features::UpdateInputState();     // reads that decision, so it runs after
