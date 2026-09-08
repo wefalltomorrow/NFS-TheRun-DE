@@ -68,6 +68,11 @@ namespace Features {
     void InitFramerateUnlocker();
     void UpdateFramerateUnlocker();
 
+    // Experimental graphics-quality work. These are deliberately independent
+    // from the framerate/GameTime code.
+    void InitAntiAliasing();
+    void InitLoadingVSyncOptimization();
+
     // Relaxes track rules (checkpoint timer, OOB reset, wrong-way respawn).
     // All INI-gated and OFF by default.
     void InitTrackRules();
@@ -120,8 +125,8 @@ namespace Features {
     // Logs Ginsu render state for troubleshooting. INI-gated, OFF by default.
     void InitGinsuDiagnostics();
 
-    // Applies fb::GameRenderSettings tweaks (FOV, viewport shift, roll, minimap fix).
-    // Runs from the ticker because the settings pointer is populated lazily.
+    // Applies fb::GameRenderSettings tweaks plus world/mesh/texture quality.
+    // Runs from the ticker because the settings pointers are populated lazily.
     void UpdateRenderSettings();
 
     // Holds the player car's health high so damage never reaches the wreck
