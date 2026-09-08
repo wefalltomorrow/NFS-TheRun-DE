@@ -1,0 +1,90 @@
+name: Build NFSTR Definitive Edition
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Apply known-good menu/cutscene FPS fix
+        run: python3 tools/apply_known_good_fps_fix.py
+
+      - name: Commit migrated source when needed
+        shell: bash
+        run: |
+          if ! git diff --quiet -- src/features/fps_unlocker.cpp; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add src/features/fps_unlocker.cpp
+            git commit -m "Fix menu/cutscene FPS without changing gameplay [skip ci]"
+            git push origin HEAD:main
+          fi
+
+      - name: Verify FPS timing scope
+        shell: bash
+        run: |
+          if grep -R "MaxSimFps" -n src/features/fps_unlocker.cpp; then
+            echo "Unexpected MaxSimFps reference in fps_unlocker.cpp"
+            exit 1
+          fi
+          if grep -R "MaxInactiveVariableFps" -n src/features/fps_unlocker.cpp; then
+            echo "Unexpected MaxInactiveVariableFps reference in fps_unlocker.cpp"
+            exit 1
+          fi
+          grep -F "*g_pSimTickEnable = 1u;" src/features/fps_unlocker.cpp
+          grep -F "g_ControlSampleCounter" src/features/fps_unlocker.cpp
+
+      - name: Install 32-bit MinGW-w64
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y g++-mingw-w64-i686
+
+      - name: Build ASI
+        run: |
+          i686-w64-mingw32-g++ -shared -O2 -std=c++17 -Wall -Wextra \
+            src/main.cpp \
+            src/logger.cpp \
+            src/config.cpp \
+            src/memory.cpp \
+            src/features/patch_util.cpp \
+            src/features/garage_render.cpp \
+            src/features/extra_ui.cpp \
+            src/features/photo_mode.cpp \
+            src/features/fps_unlocker.cpp \
+            src/features/track_rules.cpp \
+            src/features/traffic.cpp \
+            src/features/player_vehicle.cpp \
+            src/features/difficulty.cpp \
+            src/features/ai_difficulty.cpp \
+            src/features/nos_tuning.cpp \
+            src/features/tod_randomizer.cpp \
+            src/features/input_state.cpp \
+            src/features/difficulty_text.cpp \
+            src/features/engine_audio.cpp \
+            src/features/particle_fix.cpp \
+            src/features/render_settings.cpp \
+            src/features/settings_probe.cpp \
+            -o NFSTR_DefinitiveEdition.asi \
+            -lpsapi -lkernel32 -luser32 \
+            -static-libgcc -static-libstdc++
+          file NFSTR_DefinitiveEdition.asi
+          sha256sum NFSTR_DefinitiveEdition.asi | tee NFSTR_DefinitiveEdition.sha256.txt
+
+      - name: Upload compiled ASI
+        uses: actions/upload-artifact@v4
+        with:
+          name: NFSTR_DefinitiveEdition
+          path: |
+            NFSTR_DefinitiveEdition.asi
+            NFSTR_DefinitiveEdition.sha256.txt
