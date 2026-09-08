@@ -40,6 +40,13 @@ DWORD WINAPI MainThread(LPVOID /*lpParam*/) {
     Features::InitNosTuning();
     Features::InitTodRandomizer();
     Features::InitGinsuDiagnostics();
+
+    // Graphics-quality hooks are kept completely separate from GameTime. The
+    // loading patch modifies only the game's hardcoded VSync display routine and
+    // the AA hook operates on the final D3D11 back buffer at Present.
+    Features::InitLoadingVSyncOptimization();
+    Features::InitAntiAliasing();
+
     Features::InitFramerateUnlocker();
 
     Logger::Log("All features initialized successfully.");
