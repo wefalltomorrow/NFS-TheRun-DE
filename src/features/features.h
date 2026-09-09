@@ -78,6 +78,11 @@ namespace Features {
     // and mesh/texture streaming. Research branch only; no GameTime changes.
     void UpdatePopInQuality();
 
+    // Generic hidden Frostbite graphics verifier. Reads [GRAPHICS_VERIFY] from
+    // the same INI and can override reflected renderer fields by Class.Field.
+    void InitGraphicsVerification(const char* iniPath);
+    void UpdateGraphicsVerification();
+
     // Relaxes track rules (checkpoint timer, OOB reset, wrong-way respawn).
     // All INI-gated and OFF by default.
     void InitTrackRules();
