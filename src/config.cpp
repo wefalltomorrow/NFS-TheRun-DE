@@ -25,7 +25,7 @@ namespace Config {
         g_Config.UnlockCutsceneFPS    = GetPrivateProfileIntA("GRAPHICS_FPS", "UnlockCutsceneFPS",   0,  iniPath);
         g_Config.ClampSimRateWhenNoControl = GetPrivateProfileIntA("GRAPHICS_FPS", "ClampSimRateWhenNoControl", 1, iniPath);
 
-        g_Config.AntiAliasing         = GetPrivateProfileIntA("GRAPHICS_QUALITY", "AntiAliasing", 4, iniPath);
+        g_Config.AntiAliasing         = GetPrivateProfileIntA("GRAPHICS_QUALITY", "AntiAliasing", 0, iniPath);
         g_Config.FastLoadingVSyncBypass = GetPrivateProfileIntA("GRAPHICS_QUALITY", "FastLoadingVSyncBypass", 1, iniPath);
         g_Config.ForceMeshLod         = GetPrivateProfileIntA("GRAPHICS_QUALITY", "ForceMeshLod", 0, iniPath);
         g_Config.MeshGlobalLodScale   = ReadIniFloat("GRAPHICS_QUALITY", "MeshGlobalLodScale", 1000.0f, iniPath);
@@ -74,11 +74,21 @@ namespace Config {
         g_Config.ShadowmapQuality         = GetPrivateProfileIntA("WORLDRENDER", "ShadowmapQuality",        -1, iniPath);
         g_Config.ShadowmapViewDistance    = ReadIniFloat("WORLDRENDER", "ShadowmapViewDistance",         -1.0f, iniPath);
 
-        g_Config.AnisotropicFiltering     = GetPrivateProfileIntA("TEXTURE",     "AnisotropicFiltering",    -1, iniPath);
+        g_Config.AnisotropicFiltering     = GetPrivateProfileIntA("TEXTURE", "AnisotropicFiltering", -1, iniPath);
 
-        g_Config.LogNosAwards          = GetPrivateProfileIntA("DIAGNOSTICS",    "LogNosAwards",          0, iniPath);
-        g_Config.LogGinsuDiagnostics   = GetPrivateProfileIntA("DIAGNOSTICS",    "LogGinsuDiagnostics",   0, iniPath);
-        g_Config.LogSettingsContainers = GetPrivateProfileIntA("DIAGNOSTICS",    "LogSettingsContainers", 0, iniPath);
+        g_Config.TestRawMultisampleCount   = GetPrivateProfileIntA("UPSTREAM_VERIFY", "TestRawMultisampleCount",   -1, iniPath);
+        g_Config.TestShadowmapSliceCount   = GetPrivateProfileIntA("UPSTREAM_VERIFY", "TestShadowmapSliceCount",   -1, iniPath);
+        g_Config.TestMotionBlurScale       = ReadIniFloat("UPSTREAM_VERIFY", "TestMotionBlurScale", -9999.0f, iniPath);
+        g_Config.TestMotionBlurQuality     = GetPrivateProfileIntA("UPSTREAM_VERIFY", "TestMotionBlurQuality",     -1, iniPath);
+        g_Config.TestMotionBlurMaxSampleCount = GetPrivateProfileIntA("UPSTREAM_VERIFY", "TestMotionBlurMaxSampleCount", -1, iniPath);
+        g_Config.TestMotionBlurEnable      = GetPrivateProfileIntA("UPSTREAM_VERIFY", "TestMotionBlurEnable",      -1, iniPath);
+        g_Config.TestForceBlurAmount       = ReadIniFloat("UPSTREAM_VERIFY", "TestForceBlurAmount", -9999.0f, iniPath);
+        g_Config.TestViewDistance          = ReadIniFloat("UPSTREAM_VERIFY", "TestViewDistance", -1.0f, iniPath);
+        g_Config.TestDrawFps               = GetPrivateProfileIntA("UPSTREAM_VERIFY", "TestDrawFps", -1, iniPath);
+
+        g_Config.LogNosAwards          = GetPrivateProfileIntA("DIAGNOSTICS", "LogNosAwards",          0, iniPath);
+        g_Config.LogGinsuDiagnostics   = GetPrivateProfileIntA("DIAGNOSTICS", "LogGinsuDiagnostics",   0, iniPath);
+        g_Config.LogSettingsContainers = GetPrivateProfileIntA("DIAGNOSTICS", "LogSettingsContainers", 0, iniPath);
     }
 
     void LogSummary() {
@@ -113,6 +123,11 @@ namespace Config {
             g_Config.EnableWorldRenderTweaks, g_Config.ShadowmapResolution,
             g_Config.ShadowmapQuality, g_Config.ShadowmapViewDistance);
         Logger::Log("  AnisotropicFiltering=%d", g_Config.AnisotropicFiltering);
+        Logger::Log("  Verify upstream no-effect fields: RawMSAA=%d SliceCount=%d MBScale=%.3f MBQuality=%d MBMaxSamples=%d MBEnable=%d ForceBlur=%.3f ViewDistance=%.1f DrawFps=%d",
+            g_Config.TestRawMultisampleCount, g_Config.TestShadowmapSliceCount,
+            g_Config.TestMotionBlurScale, g_Config.TestMotionBlurQuality,
+            g_Config.TestMotionBlurMaxSampleCount, g_Config.TestMotionBlurEnable,
+            g_Config.TestForceBlurAmount, g_Config.TestViewDistance, g_Config.TestDrawFps);
         Logger::Log("  FixEngineAudioSlew=%d  FixKickupParticles=%d  KickupVelocityScale=%.4f",
             g_Config.FixEngineAudioSlew, g_Config.FixKickupParticles, g_Config.KickupVelocityScale);
     }
