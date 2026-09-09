@@ -40,6 +40,7 @@ jobs:
             src/main.cpp \
             src/logger.cpp \
             src/config.cpp \
+            src/ini_defaults.cpp \
             src/memory.cpp \
             src/features/patch_util.cpp \
             src/features/garage_render.cpp \
