@@ -46,6 +46,7 @@ DWORD WINAPI MainThread(LPVOID /*lpParam*/) {
     // uses Frostbite's own renderer settings; no Present/post-process hook exists.
     Features::InitLoadingVSyncOptimization();
     Features::InitAntiAliasing();
+    Features::InitGraphicsVerification(iniPath.c_str());
 
     Features::InitFramerateUnlocker();
 
@@ -66,7 +67,10 @@ DWORD WINAPI MainThread(LPVOID /*lpParam*/) {
         Features::UpdatePlayerVehicle();  // reads that decision, so it runs after
         Features::UpdateAntiAliasing();   // containers may reset/recreate on load
         Features::UpdatePopInQuality();   // aggressive hidden LOD/streaming research
-        Features::UpdateRenderSettings(); // explicit shipped settings win afterward
+        Features::UpdateRenderSettings(); // normal named graphics settings
+        // Explicit research overrides run last so an A/B test can override any
+        // earlier high-quality default without requiring another ASI build.
+        Features::UpdateGraphicsVerification();
         Features::UpdateSettingsProbe();
         Sleep(16); // ~60 Hz tick
     }
