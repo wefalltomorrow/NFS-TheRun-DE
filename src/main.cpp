@@ -4,6 +4,10 @@
 #include "config.h"
 #include "features/features.h"
 
+namespace Config {
+    int EnsureIniDefaults(const std::string& iniPath);
+}
+
 static HMODULE g_hModule = NULL;
 
 DWORD WINAPI MainThread(LPVOID /*lpParam*/) {
@@ -18,6 +22,10 @@ DWORD WINAPI MainThread(LPVOID /*lpParam*/) {
     std::string iniPath = baseDir + "NFSTR_DefinitiveEdition.ini";
     std::string logPath = baseDir + "NFSTR_DefinitiveEdition.log";
 
+    // Keep an existing INI up to date as test builds add settings. Existing keys
+    // and values are never overwritten; only genuinely missing defaults are added.
+    const int iniDefaultsAdded = Config::EnsureIniDefaults(iniPath);
+
     // 1. Load Configuration
     Config::Load(iniPath);
 
@@ -25,6 +33,11 @@ DWORD WINAPI MainThread(LPVOID /*lpParam*/) {
     //    or its output is dropped because the logger isn't ready during Load).
     Logger::Init(logPath, g_Config.DebugLog != 0);
     Logger::Log("NFSTR_DefinitiveEdition thread started.");
+    if (iniDefaultsAdded > 0) {
+        Logger::Log("INI updater added %d missing setting(s) without changing existing values.", iniDefaultsAdded);
+    } else if (iniDefaultsAdded < 0) {
+        Logger::Log("INI updater could not safely write missing settings; existing INI was left in place.");
+    }
     Config::LogSummary();
 
     // 3. Initialize Features
