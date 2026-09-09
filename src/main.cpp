@@ -65,7 +65,8 @@ DWORD WINAPI MainThread(LPVOID /*lpParam*/) {
         Features::UpdateDifficultyText();
         Features::UpdatePlayerVehicle();  // reads that decision, so it runs after
         Features::UpdateAntiAliasing();   // containers may reset/recreate on load
-        Features::UpdateRenderSettings();
+        Features::UpdatePopInQuality();   // aggressive hidden LOD/streaming research
+        Features::UpdateRenderSettings(); // explicit shipped settings win afterward
         Features::UpdateSettingsProbe();
         Sleep(16); // ~60 Hz tick
     }
