@@ -62,7 +62,6 @@ namespace {
     const float kCullScreenAreaScale             = 5.0f;
     const float kEdgeModelLodScale               = 5.0f;
     const float kEdgeModelScreenAreaScale        = 5.0f;
-    const float kTerrainLodScale                 = 5.0f;
     const float kVegetationMaxActiveDistance     = 450.0f;
     const float kMeshScatteringDistanceScale     = 5.0f;
     const int   kShadowmapResolution             = 4096;
@@ -73,12 +72,10 @@ namespace {
     const uintptr_t GR_EdgeModelLodScale         = 0x02C;
     const uintptr_t GR_EdgeModelScreenAreaScale  = 0x068;
 
-    // WorldRenderSettings. TerrainLodScale* and the reflection fields are present
-    // in the retail reflection array beyond the unreliable nominal field count.
+    // WorldRenderSettings. TerrainLodScale*, including reflection/shadow variants,
+    // are deliberately not touched: both higher and lower values visibly damage
+    // terrain geometry in The Run.
     const uintptr_t WR_CullScreenAreaScale       = 0x030;
-    const uintptr_t WR_TerrainLodScale           = 0x064;
-    const uintptr_t WR_TerrainLodScaleReflection = 0x03C;
-    const uintptr_t WR_TerrainLodScaleShadow     = 0x02C;
     const uintptr_t WR_ShadowmapResolution       = 0x044;
     const uintptr_t WR_ShadowmapViewDistance     = 0x058;
     const uintptr_t WR_ShadowQuarterDownsample   = 0x1B5;
@@ -149,11 +146,8 @@ namespace {
         const uintptr_t c = ResolveContainer(kWorldRenderTypeInfo);
         if (!c) return;
         if (!g_LogWorld) {
-            Logger::Log("POPIN-QUALITY WorldRender: CullScreenAreaScale %.3f -> %.1f, TerrainLodScale %.3f -> %.1f, TerrainReflection %.3f -> %.1f, TerrainShadow %.3f -> %.1f",
-                *reinterpret_cast<float*>(c + WR_CullScreenAreaScale), kCullScreenAreaScale,
-                *reinterpret_cast<float*>(c + WR_TerrainLodScale), kTerrainLodScale,
-                *reinterpret_cast<float*>(c + WR_TerrainLodScaleReflection), kTerrainLodScale,
-                *reinterpret_cast<float*>(c + WR_TerrainLodScaleShadow), kTerrainLodScale);
+            Logger::Log("POPIN-QUALITY WorldRender: CullScreenAreaScale %.3f -> %.1f (TerrainLodScale fields left untouched)",
+                *reinterpret_cast<float*>(c + WR_CullScreenAreaScale), kCullScreenAreaScale);
             Logger::Log("POPIN-QUALITY WorldRender stock: Shadowmap=%d @ %.1f, quarterDownsample=%u, SkyEnvmap=%d, DynamicEnvmap=%d, Planar=%dx%d, SpotShadow=%d",
                 *reinterpret_cast<int32_t*>(c + WR_ShadowmapResolution),
                 *reinterpret_cast<float*>(c + WR_ShadowmapViewDistance),
@@ -166,9 +160,6 @@ namespace {
             g_LogWorld = true;
         }
         WriteFloat(c, WR_CullScreenAreaScale,       kCullScreenAreaScale);
-        WriteFloat(c, WR_TerrainLodScale,           kTerrainLodScale);
-        WriteFloat(c, WR_TerrainLodScaleReflection, kTerrainLodScale);
-        WriteFloat(c, WR_TerrainLodScaleShadow,     kTerrainLodScale);
         WriteInt(c,   WR_ShadowmapResolution,       kShadowmapResolution);
         WriteFloat(c, WR_ShadowmapViewDistance,     kShadowmapViewDistance);
         WriteBool(c,  WR_ShadowQuarterDownsample,   false);
