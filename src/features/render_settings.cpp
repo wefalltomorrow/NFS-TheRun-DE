@@ -22,9 +22,12 @@
 // Field offsets confirmed live in ReClass against the running game:
 //   0x0C float ForceRoll
 //   0x14 float ForceRenderShiftX
+//   0x1C float ForceBlurAmount
 //   0x20 float ForceFov                 (-1 = engine default, which is 48)
 //   0x34 float ForceRenderShiftY
+//   0x48 float ViewDistance
 //   0x77 bool  InitialClearEnable
+//   0x7B bool  DrawFps
 //   0x8B bool  ForceRenderShiftEnabled  (gates ForceRenderShiftX/Y)
 
 // Validated control state, maintained by fps_unlocker.cpp: -1 unknown, 0 no
@@ -38,15 +41,24 @@ namespace {
 
     // What the engine itself stores in ForceFov: -1 means "no override".
     const float kFovDisabled = -1.0f;
+    const float kVerifyFloatDisabled = -9000.0f;
 
     const uintptr_t kOffForceRoll         = 0x0C;
     const uintptr_t kOffForceRenderShiftX = 0x14;
+    const uintptr_t kOffForceBlurAmount   = 0x1C;
     const uintptr_t kOffForceFov          = 0x20;
     const uintptr_t kOffForceRenderShiftY = 0x34;
+    const uintptr_t kOffViewDistance      = 0x48;
     const uintptr_t kOffInitialClear      = 0x77;
+    const uintptr_t kOffDrawFps           = 0x7B;
     const uintptr_t kOffForceShiftEnabled = 0x8B;
 
     bool g_LoggedApply = false;
+    bool g_LoggedGameRenderVerify = false;
+
+    inline bool VerifyFloatEnabled(float v) {
+        return v > kVerifyFloatDisabled;
+    }
 
     inline void WriteFloat(uintptr_t base, uintptr_t off, float v) {
         float* p = reinterpret_cast<float*>(base + off);
@@ -90,29 +102,40 @@ namespace {
 }
 
 // ---------------------------------------------------------------------------
-// fb::WorldRenderSettings — shadows + dynamic vehicle livery target.
-//
-// Unlike GameRenderSettings this has no static cached pointer, so it is resolved
-// through the settings manager. Some fields are read when a level/render target
-// is initialised, therefore the ticker keeps the desired values resident so they
-// are already present before the next event loads.
-//
-// Native MultisampleCount (+0xB8) and the obvious motion-blur fields were tested
-// by the upstream project and do not affect the retail renderer. Anti-aliasing is
-// therefore implemented separately as a real D3D11 post-process rather than
-// exposing a placebo MSAA setting here.
+// fb::WorldRenderSettings — normal shipped tweaks plus the upstream "no effect"
+// fields exposed under [UPSTREAM_VERIFY]. The verification writes deliberately
+// stay resident across level transitions, because the renderer reads several of
+// these fields while setting a level up rather than continuously mid-race.
 namespace {
-    const uintptr_t kOffShadowmapResolution   = 0x044;
-    const uintptr_t kOffShadowmapQuality      = 0x048;
-    const uintptr_t kOffShadowmapViewDistance = 0x058;
-    const uintptr_t kOffVinylTargetSize       = 0x090;
+    const uintptr_t kOffShadowmapResolution       = 0x044;
+    const uintptr_t kOffShadowmapQuality          = 0x048;
+    const uintptr_t kOffShadowmapSliceCount       = 0x04C;
+    const uintptr_t kOffShadowmapViewDistance     = 0x058;
+    const uintptr_t kOffVinylTargetSize           = 0x090;
+    const uintptr_t kOffMotionBlurScale           = 0x098;
+    const uintptr_t kOffMotionBlurQuality         = 0x0A0;
+    const uintptr_t kOffMotionBlurMaxSampleCount  = 0x0AC;
+    const uintptr_t kOffMultisampleCount          = 0x0B8;
+    const uintptr_t kOffMotionBlurEnable          = 0x1AE;
 
     bool g_LoggedWorld = false;
+    bool g_LoggedWorldVerify = false;
+    bool g_LoggedRawMsaaConflict = false;
+
+    bool WantWorldVerification() {
+        return g_Config.TestRawMultisampleCount >= 0 ||
+               g_Config.TestShadowmapSliceCount >= 0 ||
+               VerifyFloatEnabled(g_Config.TestMotionBlurScale) ||
+               g_Config.TestMotionBlurQuality >= 0 ||
+               g_Config.TestMotionBlurMaxSampleCount >= 0 ||
+               g_Config.TestMotionBlurEnable >= 0;
+    }
 
     void ApplyWorldRender() {
         const bool wantWorldTweaks = g_Config.EnableWorldRenderTweaks != 0;
         const bool wantVinyl = g_Config.VinylTargetSize > 0;
-        if (!wantWorldTweaks && !wantVinyl) return;
+        const bool wantVerify = WantWorldVerification();
+        if (!wantWorldTweaks && !wantVinyl && !wantVerify) return;
 
         uintptr_t w = ResolveContainer(kWorldRenderTypeInfo);
         if (!w) return;
@@ -135,6 +158,42 @@ namespace {
         // render target. The field comes directly from Frostbite reflection data.
         if (wantVinyl) {
             WriteInt(w, kOffVinylTargetSize, g_Config.VinylTargetSize);
+        }
+
+        if (wantVerify) {
+            if (!g_LoggedWorldVerify) {
+                Logger::Log("UPSTREAM_VERIFY WorldRender before writes: SliceCount=%d MultisampleCount=%d MotionBlurScale=%.3f MotionBlurQuality=%d MotionBlurMaxSamples=%d MotionBlurEnable=%u.",
+                            *reinterpret_cast<int32_t*>(w + kOffShadowmapSliceCount),
+                            *reinterpret_cast<int32_t*>(w + kOffMultisampleCount),
+                            *reinterpret_cast<float*>(w + kOffMotionBlurScale),
+                            *reinterpret_cast<int32_t*>(w + kOffMotionBlurQuality),
+                            *reinterpret_cast<int32_t*>(w + kOffMotionBlurMaxSampleCount),
+                            static_cast<unsigned>(*reinterpret_cast<uint8_t*>(w + kOffMotionBlurEnable)));
+                g_LoggedWorldVerify = true;
+            }
+
+            if (g_Config.TestShadowmapSliceCount >= 0)
+                WriteInt(w, kOffShadowmapSliceCount, g_Config.TestShadowmapSliceCount);
+
+            if (g_Config.TestRawMultisampleCount >= 0) {
+                if (g_Config.AntiAliasing > 1 && !g_LoggedRawMsaaConflict) {
+                    Logger::Log("UPSTREAM_VERIFY warning: TestRawMultisampleCount is active while AntiAliasing=%d also enables DxMultisampleEnable. Set AntiAliasing=0 to reproduce upstream's standalone MultisampleCount test exactly.", g_Config.AntiAliasing);
+                    g_LoggedRawMsaaConflict = true;
+                }
+                WriteInt(w, kOffMultisampleCount, g_Config.TestRawMultisampleCount);
+            }
+
+            if (VerifyFloatEnabled(g_Config.TestMotionBlurScale))
+                WriteFloat(w, kOffMotionBlurScale, g_Config.TestMotionBlurScale);
+
+            if (g_Config.TestMotionBlurQuality >= 0)
+                WriteInt(w, kOffMotionBlurQuality, g_Config.TestMotionBlurQuality);
+
+            if (g_Config.TestMotionBlurMaxSampleCount >= 0)
+                WriteInt(w, kOffMotionBlurMaxSampleCount, g_Config.TestMotionBlurMaxSampleCount);
+
+            if (g_Config.TestMotionBlurEnable >= 0)
+                WriteBool(w, kOffMotionBlurEnable, g_Config.TestMotionBlurEnable != 0);
         }
     }
 }
@@ -205,11 +264,40 @@ namespace {
     }
 }
 
+namespace {
+    void ApplyGameRenderVerification() {
+        const bool wantVerify = VerifyFloatEnabled(g_Config.TestForceBlurAmount) ||
+                                g_Config.TestViewDistance >= 0.0f ||
+                                g_Config.TestDrawFps >= 0;
+        if (!wantVerify) return;
+
+        uintptr_t slot = Memory::GetGameBase() + kSettingsPtrOffset;
+        uintptr_t settings = *reinterpret_cast<uintptr_t*>(slot);
+        if (settings < 0x10000) return;
+
+        if (!g_LoggedGameRenderVerify) {
+            Logger::Log("UPSTREAM_VERIFY GameRender before writes: ForceBlurAmount=%.3f ViewDistance=%.1f DrawFps=%u.",
+                        *reinterpret_cast<float*>(settings + kOffForceBlurAmount),
+                        *reinterpret_cast<float*>(settings + kOffViewDistance),
+                        static_cast<unsigned>(*reinterpret_cast<uint8_t*>(settings + kOffDrawFps)));
+            g_LoggedGameRenderVerify = true;
+        }
+
+        if (VerifyFloatEnabled(g_Config.TestForceBlurAmount))
+            WriteFloat(settings, kOffForceBlurAmount, g_Config.TestForceBlurAmount);
+        if (g_Config.TestViewDistance >= 0.0f)
+            WriteFloat(settings, kOffViewDistance, g_Config.TestViewDistance);
+        if (g_Config.TestDrawFps >= 0)
+            WriteBool(settings, kOffDrawFps, g_Config.TestDrawFps != 0);
+    }
+}
+
 namespace Features {
     void UpdateRenderSettings() {
         ApplyWorldRender();
         ApplyMeshQuality();
         ApplyShaderSystem();
+        ApplyGameRenderVerification();
 
         if (!g_Config.EnableRenderTweaks) return;
 
