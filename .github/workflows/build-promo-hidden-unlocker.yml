@@ -1,0 +1,39 @@
+name: Build NFSTR Promo Hidden Unlocker
+
+on:
+  push:
+    branches: [promo-hidden-unlocker]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install 32-bit MinGW-w64
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y g++-mingw-w64-i686
+
+      - name: Build ASI
+        run: |
+          i686-w64-mingw32-g++ -shared -O2 -std=c++17 -Wall -Wextra \
+            extras/NFSTR_PromoHiddenUnlocker/promo_hidden_unlocker.cpp \
+            -o NFSTR_PromoHiddenUnlocker.asi \
+            -lkernel32 \
+            -static-libgcc -static-libstdc++
+          file NFSTR_PromoHiddenUnlocker.asi
+          sha256sum NFSTR_PromoHiddenUnlocker.asi | tee NFSTR_PromoHiddenUnlocker.sha256.txt
+
+      - name: Upload ASI
+        uses: actions/upload-artifact@v4
+        with:
+          name: NFSTR_PromoHiddenUnlocker
+          path: |
+            NFSTR_PromoHiddenUnlocker.asi
+            NFSTR_PromoHiddenUnlocker.sha256.txt
