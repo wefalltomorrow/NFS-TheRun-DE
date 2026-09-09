@@ -64,6 +64,12 @@ namespace Features {
     // unhiding every hidden entry the way InitExtraUIOptions does.
     void InitPhotoMode();
 
+    // Deliberately offline sessions can suppress NFS/EA online-service work:
+    // Autolog/single-player-online, telemetry, matchmaking, VOIP and upload/report
+    // flags. Frostbite NetworkSettings are intentionally untouched.
+    void InitOfflineMode(bool enabled);
+    void UpdateOfflineMode();
+
     // Unlocks framerate cap via GameTime hook; adjustable via INI
     void InitFramerateUnlocker();
     void UpdateFramerateUnlocker();
