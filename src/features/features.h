@@ -17,7 +17,7 @@ namespace Difficulty {
     // has an equivalent in [VEHICLE] that the player can set for themselves; the
     // mode overrides that while it is engaged.
     const float kAiSkillScale          = 1.10f;
-    const float kAiGlueScale           = 0.97f;
+    const float kAiGlueScale            = 0.97f;
     const float kAiNosRechargeScale    = 2.00f;
     const float kPlayerNosRechargeScale = 0.12f;
     // The recharge is (base + bonus) * scalar, so turning the scalar down turns
@@ -73,6 +73,10 @@ namespace Features {
     void InitAntiAliasing();
     void UpdateAntiAliasing();
     void InitLoadingVSyncOptimization();
+
+    // Aggressive research pass for view distance, LOD, terrain/vegetation distance
+    // and mesh/texture streaming. Research branch only; no GameTime changes.
+    void UpdatePopInQuality();
 
     // Relaxes track rules (checkpoint timer, OOB reset, wrong-way respawn).
     // All INI-gated and OFF by default.
