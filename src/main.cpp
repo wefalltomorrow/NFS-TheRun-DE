@@ -33,6 +33,16 @@ namespace {
                                             entries[i].value, iniPath.c_str())) return -1;
             ++added;
         }
+
+        // This branch is being tested on a deliberately offline installation, so
+        // make the offline-service suppression visible and enabled automatically.
+        // Existing values are still never overwritten; set it to 0 if online play
+        // is ever wanted again.
+        if (!IniKeyExists("OFFLINE", "DisableOnlineServices", iniPath)) {
+            if (!WritePrivateProfileStringA("OFFLINE", "DisableOnlineServices", "1", iniPath.c_str())) return -1;
+            ++added;
+        }
+
         WritePrivateProfileStringA(nullptr, nullptr, nullptr, iniPath.c_str());
         return added;
     }
@@ -66,6 +76,8 @@ DWORD WINAPI MainThread(LPVOID /*lpParam*/) {
         GetPrivateProfileIntA("GRAPHICS_RESEARCH", "EnableNativeMSAAResearch", 0, iniPath.c_str()) != 0;
     const bool enablePopInQualityResearch =
         GetPrivateProfileIntA("GRAPHICS_RESEARCH", "EnablePopInQualityResearch", 0, iniPath.c_str()) != 0;
+    const bool disableOnlineServices =
+        GetPrivateProfileIntA("OFFLINE", "DisableOnlineServices", 1, iniPath.c_str()) != 0;
     if (!enableNativeMsaaResearch) g_Config.AntiAliasing = 0;
 
     // 2. Initialize Logger, then log the config (LogSummary must run after Init,
@@ -85,11 +97,15 @@ DWORD WINAPI MainThread(LPVOID /*lpParam*/) {
     Logger::Log("Graphics research gates: NativeMSAA=%d  PopInQuality=%d",
                 enableNativeMsaaResearch ? 1 : 0,
                 enablePopInQualityResearch ? 1 : 0);
+    Logger::Log("Offline services: DisableOnlineServices=%d", disableOnlineServices ? 1 : 0);
     if (!enableNativeMsaaResearch) {
         Logger::Log("Native MSAA research is gated OFF; [GRAPHICS_QUALITY] AntiAliasing is ignored for this run.");
     }
 
     // 3. Initialize Features
+    // Put offline suppression first so it can take ownership as soon as
+    // NfsOnlineSettings is registered by the engine.
+    Features::InitOfflineMode(disableOnlineServices);
     Features::InitGarageCarRender();
     Features::InitExtraUIOptions();
     Features::InitPhotoMode();
@@ -116,6 +132,7 @@ DWORD WINAPI MainThread(LPVOID /*lpParam*/) {
 
     // 4. Background Ticker Loop
     while (true) {
+        Features::UpdateOfflineMode();   // apply as soon as NfsOnlineSettings exists
         Features::UpdateFramerateUnlocker();
         Features::UpdateParticleFix();
         Features::UpdateDifficulty();     // decides whether the mode is engaged
