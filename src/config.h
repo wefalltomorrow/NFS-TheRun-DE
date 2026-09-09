@@ -27,10 +27,9 @@ struct ConfigStruct {
     int ClampSimRateWhenNoControl = 1;
 
     // [GRAPHICS_QUALITY] — experimental high-quality rendering options.
-    // Defaults are ON for the graphics test branch so an existing INI can test
-    // the build without needing new keys. Every option can still be disabled
-    // independently by adding it to the INI.
-    int AntiAliasing = 4;              // native Frostbite MSAA: 0 off, 2/4/8 samples
+    // This verification branch defaults native MSAA OFF so the raw upstream
+    // MultisampleCount-only experiment can be reproduced without the shader gate.
+    int AntiAliasing = 0;              // native Frostbite MSAA: 0 off, 2/4/8 samples
     int FastLoadingVSyncBypass = 1;    // port of mRally2's hardcoded VSync bypass
     int ForceMeshLod = 0;              // -1 engine choice, 0 highest LOD, 1+ lower LODs
     float MeshGlobalLodScale = 1000.0f;// pushes normal LOD transitions far away
@@ -96,8 +95,6 @@ struct ConfigStruct {
 
     // [WORLDRENDER] — fb::WorldRenderSettings. Resolved through the settings
     // manager, not a static pointer. -1 means "leave the engine's own value".
-    // Only the shadow settings are here. The standalone MultisampleCount test was
-    // inconclusive; native MSAA is now tested separately with its shader-system gate.
     int EnableWorldRenderTweaks = 0;
     int ShadowmapResolution = -1;        // 2048 at the game's highest preset
     int ShadowmapQuality = -1;           // stock 1; 0 or 2 disable the filtering
@@ -107,6 +104,19 @@ struct ConfigStruct {
     // Stock 4. The engine rewrites it back to 4 whenever a level loads, so the
     // ticker keeps reapplying it. -1 leaves the engine's own value.
     int AnisotropicFiltering = -1;
+
+    // [UPSTREAM_VERIFY] — exact reflected fields which upstream tested and
+    // documented as having no visible effect. All disabled by default. These are
+    // intentionally raw writes so they can be verified independently.
+    int TestRawMultisampleCount = -1;       // WorldRender +0x0B8; set AntiAliasing=0 for exact standalone test
+    int TestShadowmapSliceCount = -1;       // WorldRender +0x04C
+    float TestMotionBlurScale = -9999.0f;   // WorldRender +0x098
+    int TestMotionBlurQuality = -1;          // WorldRender +0x0A0
+    int TestMotionBlurMaxSampleCount = -1;   // WorldRender +0x0AC
+    int TestMotionBlurEnable = -1;           // WorldRender +0x1AE; 0/1
+    float TestForceBlurAmount = -9999.0f;    // GameRender +0x01C
+    float TestViewDistance = -1.0f;          // GameRender +0x048
+    int TestDrawFps = -1;                    // GameRender +0x07B; 0/1
 
     // [DIAGNOSTICS] Log Ginsu render state ~1x/sec per voice. Troubleshooting only.
     int LogNosAwards = 0;
