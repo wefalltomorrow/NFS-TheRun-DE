@@ -49,6 +49,7 @@ jobs:
             src/features/loading_vsync.cpp \
             src/features/anti_aliasing.cpp \
             src/features/popin_quality.cpp \
+            src/features/graphics_verify.cpp \
             src/features/track_rules.cpp \
             src/features/traffic.cpp \
             src/features/player_vehicle.cpp \
@@ -71,7 +72,7 @@ jobs:
       - name: Upload compiled ASI
         uses: actions/upload-artifact@v4
         with:
-          name: NFSTR_DefinitiveEdition-popin-quality-experimental
+          name: NFSTR_DefinitiveEdition-graphics-verification
           path: |
             NFSTR_DefinitiveEdition.asi
             NFSTR_DefinitiveEdition.sha256.txt
