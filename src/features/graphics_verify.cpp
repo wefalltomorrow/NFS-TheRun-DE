@@ -12,33 +12,20 @@
 
 // Generic Frostbite graphics-settings verifier for NFS The Run v1.1.
 //
-// The retail exe contains reflection metadata for far more renderer settings than
-// the in-game graphics menu exposes. Instead of hardcoding a one-off C++ option
-// for every experiment, [GRAPHICS_VERIFY] accepts:
+// [GRAPHICS_VERIFY] accepts Class.Field=value and writes reflected settings live.
+// DumpCurrentValues=1 enumerates the same reflected fields and logs their values.
 //
-//   Class.Field=value
+// Important Frostbite 2 reflection layout (32-bit retail build):
+//   TypeInfoData::size       @ +0x06 (uint16)
+//   TypeInfoData::fieldCount @ +0x0D (uint8)
+//   ClassInfoData::super     @ +0x10 (ClassInfo*)
+//   ClassInfoData::fields    @ +0x18 (FieldInfoData*)
+//   FieldInfoData stride     = 12 bytes
 //
-// Examples:
-//   WorldRender.MultisampleCount=4
-//   GameRender.ViewDistance=f:100000
-//   TextureStreaming.MipmapBias=f:-1.0
-//   VegetationSystem.MaxActiveDistance=f:500
-//
-// The verifier resolves the live settings container, finds the field in the
-// game's own reflection table, infers bool/int/float where possible, writes the
-// value continuously (containers may reset on level loads), and logs the original
-// value the first time it applies.
-//
-// Explicit prefixes are available for enum/unknown fields:
-//   b:0 / b:1
-//   i:123
-//   f:1.25
-//   v2:1.0,2.0
-//   v4:1.0,2.0,3.0,4.0
-//
-// DumpCurrentValues=1 logs the reflected fields/current values for every graphics
-// container as it becomes available. This is intentionally research-only and
-// does not touch GameTime or simulation timing.
+// Earlier research code accidentally read a uint16 at +0x04 as fieldCount and
+// then scanned beyond it. That walked into adjacent reflection tables and produced
+// bogus bools, NaNs and garbage pool sizes. This implementation follows the FB2
+// layout and walks superclass reflection explicitly instead of over-scanning.
 
 namespace {
     const uintptr_t kSettingsManagerPtr = 0x2446C74; // fb::g_settingsManager
@@ -65,7 +52,6 @@ namespace {
         { "Texture",           0x2AA0A38 - 0x400000, false },
         { "TextureStreaming",  0x2AA09E0 - 0x400000, false },
         { "Mesh",              0x2AA22C8 - 0x400000, false },
-        // Recovered from the exact v1.1 executable while tracing pop-in.
         { "MeshStreaming",     0x2AA22F4 - 0x400000, false },
         { "ShaderSystem",      0x2AA3428 - 0x400000, false },
         { "DxDisplay",         0x2AA0884 - 0x400000, false },
@@ -98,7 +84,7 @@ namespace {
         uint16_t offset = 0;
         uintptr_t typePtr = 0;
         bool found = false;
-        bool extended = false;
+        bool inherited = false;
     };
 
     std::vector<Override> g_Overrides;
@@ -118,7 +104,7 @@ namespace {
         if (ptr < 0x10000) return false;
         for (size_t i = 0; i <= wanted.size(); ++i) {
             if (!Memory::IsReadable(ptr + i, 1)) return false;
-            char c = *reinterpret_cast<const char*>(ptr + i);
+            const char c = *reinterpret_cast<const char*>(ptr + i);
             if (i == wanted.size()) return c == '\0';
             if (std::tolower(static_cast<unsigned char>(c)) !=
                 std::tolower(static_cast<unsigned char>(wanted[i]))) return false;
@@ -131,7 +117,7 @@ namespace {
         if (ptr < 0x10000) return out;
         for (size_t i = 0; i < maxLen; ++i) {
             if (!Memory::IsReadable(ptr + i, 1)) break;
-            char c = *reinterpret_cast<const char*>(ptr + i);
+            const char c = *reinterpret_cast<const char*>(ptr + i);
             if (!c) break;
             if (static_cast<unsigned char>(c) < 0x20 || static_cast<unsigned char>(c) > 0x7E) break;
             out.push_back(c);
@@ -158,37 +144,74 @@ namespace {
         return (c >= 0x10000) ? c : 0;
     }
 
-    bool GetReflectionTable(const GraphicsClass& cls, uintptr_t& fieldArray, uint16_t& fieldCount) {
+    uintptr_t RootTypeData(const GraphicsClass& cls) {
         const uintptr_t base = Memory::GetGameBase();
+        if (!base) return 0;
         const uintptr_t typeInfo = base + cls.typeInfoOffset;
-        if (!Memory::IsReadable(typeInfo, sizeof(uintptr_t))) return false;
+        if (!Memory::IsReadable(typeInfo, sizeof(uintptr_t))) return 0;
         const uintptr_t typeData = *reinterpret_cast<uintptr_t*>(typeInfo);
-        if (typeData < 0x10000 || !Memory::IsReadable(typeData + 0x18, sizeof(uintptr_t))) return false;
-        fieldCount = *reinterpret_cast<uint16_t*>(typeData + 4);
+        if (typeData < 0x10000 || !Memory::IsReadable(typeData, 0x1C)) return 0;
+        return typeData;
+    }
+
+    uint16_t TypeSize(uintptr_t typeData) {
+        if (!typeData || !Memory::IsReadable(typeData + 0x06, sizeof(uint16_t))) return 0;
+        return *reinterpret_cast<uint16_t*>(typeData + 0x06);
+    }
+
+    bool GetDeclaredFields(uintptr_t typeData, uintptr_t& fieldArray, uint8_t& fieldCount) {
+        if (!typeData || !Memory::IsReadable(typeData + 0x18, sizeof(uintptr_t))) return false;
+        if (!Memory::IsReadable(typeData + 0x0D, sizeof(uint8_t))) return false;
+
+        fieldCount = *reinterpret_cast<uint8_t*>(typeData + 0x0D);
         fieldArray = *reinterpret_cast<uintptr_t*>(typeData + 0x18);
-        if (fieldCount == 0 || fieldCount > 512 || fieldArray < 0x10000) return false;
-        return true;
+
+        if (fieldCount == 0) {
+            fieldArray = 0;
+            return true;
+        }
+        return fieldArray >= 0x10000 && Memory::IsReadable(fieldArray, static_cast<size_t>(fieldCount) * 12u);
+    }
+
+    uintptr_t GetSuperTypeData(uintptr_t typeData) {
+        if (!typeData || !Memory::IsReadable(typeData + 0x10, sizeof(uintptr_t))) return 0;
+        const uintptr_t superTypeInfo = *reinterpret_cast<uintptr_t*>(typeData + 0x10);
+        if (superTypeInfo < 0x10000 || !Memory::IsReadable(superTypeInfo, sizeof(uintptr_t))) return 0;
+        const uintptr_t superTypeData = *reinterpret_cast<uintptr_t*>(superTypeInfo);
+        if (superTypeData < 0x10000 || superTypeData == typeData || !Memory::IsReadable(superTypeData, 0x1C)) return 0;
+        return superTypeData;
+    }
+
+    bool ValidFieldOffset(uint16_t objectSize, uint16_t offset, size_t bytes) {
+        if (objectSize == 0) return true;
+        return static_cast<size_t>(offset) + bytes <= static_cast<size_t>(objectSize);
     }
 
     FieldInfo FindField(const GraphicsClass& cls, const std::string& fieldName) {
         FieldInfo out;
-        uintptr_t fields = 0;
-        uint16_t count = 0;
-        if (!GetReflectionTable(cls, fields, count)) return out;
+        uintptr_t typeData = RootTypeData(cls);
+        if (!typeData) return out;
+        const uint16_t objectSize = TypeSize(typeData);
 
-        // Search the declared count first. Some Frostbite classes under-report the
-        // count, so then search a small extension. We mark that case in the log.
-        const size_t searchCount = std::min<size_t>(static_cast<size_t>(count) + 64u, 512u);
-        for (size_t i = 0; i < searchCount; ++i) {
-            const uintptr_t entry = fields + i * 12u;
-            if (!Memory::IsReadable(entry, 12)) break;
-            const uintptr_t namePtr = *reinterpret_cast<uintptr_t*>(entry + 0);
-            if (!SafeCStringEquals(namePtr, fieldName)) continue;
-            out.offset = *reinterpret_cast<uint16_t*>(entry + 6);
-            out.typePtr = *reinterpret_cast<uintptr_t*>(entry + 8);
-            out.found = true;
-            out.extended = (i >= count);
-            return out;
+        for (unsigned depth = 0; typeData && depth < 16; ++depth) {
+            uintptr_t fields = 0;
+            uint8_t count = 0;
+            if (!GetDeclaredFields(typeData, fields, count)) return out;
+
+            for (uint8_t i = 0; i < count; ++i) {
+                const uintptr_t entry = fields + static_cast<uintptr_t>(i) * 12u;
+                const uintptr_t namePtr = *reinterpret_cast<uintptr_t*>(entry + 0);
+                if (!SafeCStringEquals(namePtr, fieldName)) continue;
+
+                const uint16_t off = *reinterpret_cast<uint16_t*>(entry + 6);
+                if (!ValidFieldOffset(objectSize, off, 1)) return out;
+                out.offset = off;
+                out.typePtr = *reinterpret_cast<uintptr_t*>(entry + 8);
+                out.found = true;
+                out.inherited = (depth != 0);
+                return out;
+            }
+            typeData = GetSuperTypeData(typeData);
         }
         return out;
     }
@@ -203,6 +226,17 @@ namespace {
         if (typePtr == base + kTypeVec2) return Kind::Vec2;
         if (typePtr == base + kTypeVec4A || typePtr == base + kTypeVec4B) return Kind::Vec4;
         return Kind::Unknown;
+    }
+
+    size_t KindSize(Kind k) {
+        switch (k) {
+            case Kind::Bool: return 1;
+            case Kind::Int: return 4;
+            case Kind::Float: return 4;
+            case Kind::Vec2: return 8;
+            case Kind::Vec4: return 16;
+            default: return 4;
+        }
     }
 
     bool ParseFloats(const char* s, float* out, int count) {
@@ -250,7 +284,7 @@ namespace {
         FieldInfo fi = FindField(*cls, ov.fieldName);
         if (!fi.found) {
             if (!ov.missingLogged) {
-                Logger::Log("GRAPHICS_VERIFY field not found in reflection: %s.%s.", cls->alias, ov.fieldName.c_str());
+                Logger::Log("GRAPHICS_VERIFY field not found in declared/inherited reflection: %s.%s.", cls->alias, ov.fieldName.c_str());
                 ov.missingLogged = true;
             }
             return false;
@@ -269,13 +303,23 @@ namespace {
             }
             if (forcedKind) value += 2;
         } else if (_strnicmp(value, "v2:", 3) == 0) {
-            kind = Kind::Vec2; value += 3; forcedKind = true;
+            kind = Kind::Vec2;
+            value += 3;
+            forcedKind = true;
         } else if (_strnicmp(value, "v4:", 3) == 0) {
-            kind = Kind::Vec4; value += 3; forcedKind = true;
+            kind = Kind::Vec4;
+            value += 3;
+            forcedKind = true;
         }
 
+        const uintptr_t root = RootTypeData(*cls);
+        const uint16_t objectSize = TypeSize(root);
+        const size_t bytes = KindSize(kind);
+        if (!ValidFieldOffset(objectSize, fi.offset, bytes)) return false;
+
         const uintptr_t addr = container + fi.offset;
-        if (!Memory::IsReadable(addr, 16)) return false;
+        if (!Memory::IsReadable(addr, bytes)) return false;
+        const char* inherited = fi.inherited ? " (inherited)" : "";
 
         switch (kind) {
             case Kind::Bool: {
@@ -283,7 +327,7 @@ namespace {
                 const uint8_t wanted = (std::atoi(value) != 0) ? 1u : 0u;
                 if (!ov.logged) Logger::Log("GRAPHICS_VERIFY %s.%s +0x%03X [%s%s] %u -> %u%s",
                     cls->alias, ov.fieldName.c_str(), fi.offset, forcedKind ? "forced " : "", KindName(kind),
-                    static_cast<unsigned>(old), static_cast<unsigned>(wanted), fi.extended ? " (extended reflection)" : "");
+                    static_cast<unsigned>(old), static_cast<unsigned>(wanted), inherited);
                 if (old != wanted) *reinterpret_cast<uint8_t*>(addr) = wanted;
                 break;
             }
@@ -292,7 +336,7 @@ namespace {
                 const int32_t wanted = static_cast<int32_t>(std::strtol(value, nullptr, 0));
                 if (!ov.logged) Logger::Log("GRAPHICS_VERIFY %s.%s +0x%03X [%s%s] %d -> %d%s",
                     cls->alias, ov.fieldName.c_str(), fi.offset, forcedKind ? "forced " : "", KindName(kind),
-                    old, wanted, fi.extended ? " (extended reflection)" : "");
+                    old, wanted, inherited);
                 if (old != wanted) *reinterpret_cast<int32_t*>(addr) = wanted;
                 break;
             }
@@ -301,25 +345,28 @@ namespace {
                 const float wanted = std::strtof(value, nullptr);
                 if (!ov.logged) Logger::Log("GRAPHICS_VERIFY %s.%s +0x%03X [%s%s] %.6g -> %.6g%s",
                     cls->alias, ov.fieldName.c_str(), fi.offset, forcedKind ? "forced " : "", KindName(kind),
-                    old, wanted, fi.extended ? " (extended reflection)" : "");
+                    old, wanted, inherited);
                 if (old != wanted) *reinterpret_cast<float*>(addr) = wanted;
                 break;
             }
             case Kind::Vec2: {
-                float wanted[2]; if (!ParseFloats(value, wanted, 2)) return false;
+                float wanted[2];
+                if (!ParseFloats(value, wanted, 2)) return false;
                 float* p = reinterpret_cast<float*>(addr);
                 if (!ov.logged) Logger::Log("GRAPHICS_VERIFY %s.%s +0x%03X [%s%s] (%.4g,%.4g) -> (%.4g,%.4g)%s",
                     cls->alias, ov.fieldName.c_str(), fi.offset, forcedKind ? "forced " : "", KindName(kind),
-                    p[0], p[1], wanted[0], wanted[1], fi.extended ? " (extended reflection)" : "");
-                p[0] = wanted[0]; p[1] = wanted[1];
+                    p[0], p[1], wanted[0], wanted[1], inherited);
+                p[0] = wanted[0];
+                p[1] = wanted[1];
                 break;
             }
             case Kind::Vec4: {
-                float wanted[4]; if (!ParseFloats(value, wanted, 4)) return false;
+                float wanted[4];
+                if (!ParseFloats(value, wanted, 4)) return false;
                 float* p = reinterpret_cast<float*>(addr);
                 if (!ov.logged) Logger::Log("GRAPHICS_VERIFY %s.%s +0x%03X [%s%s] (%.4g,%.4g,%.4g,%.4g) -> (%.4g,%.4g,%.4g,%.4g)%s",
                     cls->alias, ov.fieldName.c_str(), fi.offset, forcedKind ? "forced " : "", KindName(kind),
-                    p[0], p[1], p[2], p[3], wanted[0], wanted[1], wanted[2], wanted[3], fi.extended ? " (extended reflection)" : "");
+                    p[0], p[1], p[2], p[3], wanted[0], wanted[1], wanted[2], wanted[3], inherited);
                 for (int i = 0; i < 4; ++i) p[i] = wanted[i];
                 break;
             }
@@ -337,57 +384,87 @@ namespace {
         return true;
     }
 
+    void DumpOneField(const GraphicsClass& cls, uintptr_t container, uint16_t objectSize,
+                      uintptr_t entry, bool inherited) {
+        if (!Memory::IsReadable(entry, 12)) return;
+        const uintptr_t namePtr = *reinterpret_cast<uintptr_t*>(entry + 0);
+        const std::string name = SafeCString(namePtr);
+        if (name.empty()) return;
+
+        const uint16_t off = *reinterpret_cast<uint16_t*>(entry + 6);
+        const uintptr_t typePtr = *reinterpret_cast<uintptr_t*>(entry + 8);
+        const Kind kind = AutoKind(typePtr);
+        const size_t bytes = KindSize(kind);
+        if (!ValidFieldOffset(objectSize, off, bytes)) return;
+
+        const uintptr_t addr = container + off;
+        if (!Memory::IsReadable(addr, bytes)) return;
+        const char* suffix = inherited ? " (inherited)" : "";
+
+        switch (kind) {
+            case Kind::Bool:
+                Logger::Log("  %s.%s +0x%03X bool=%u%s", cls.alias, name.c_str(), off,
+                    static_cast<unsigned>(*reinterpret_cast<uint8_t*>(addr)), suffix);
+                break;
+            case Kind::Int:
+                Logger::Log("  %s.%s +0x%03X int=%d%s", cls.alias, name.c_str(), off,
+                    *reinterpret_cast<int32_t*>(addr), suffix);
+                break;
+            case Kind::Float:
+                Logger::Log("  %s.%s +0x%03X float=%.7g%s", cls.alias, name.c_str(), off,
+                    *reinterpret_cast<float*>(addr), suffix);
+                break;
+            case Kind::Vec2: {
+                float* p = reinterpret_cast<float*>(addr);
+                Logger::Log("  %s.%s +0x%03X vec2=(%.5g,%.5g)%s", cls.alias, name.c_str(), off,
+                    p[0], p[1], suffix);
+                break;
+            }
+            case Kind::Vec4: {
+                float* p = reinterpret_cast<float*>(addr);
+                Logger::Log("  %s.%s +0x%03X vec4=(%.5g,%.5g,%.5g,%.5g)%s", cls.alias, name.c_str(), off,
+                    p[0], p[1], p[2], p[3], suffix);
+                break;
+            }
+            default:
+                Logger::Log("  %s.%s +0x%03X type=0x%08X raw32=0x%08X%s", cls.alias, name.c_str(), off,
+                    static_cast<unsigned>(typePtr), static_cast<unsigned>(*reinterpret_cast<uint32_t*>(addr)), suffix);
+                break;
+        }
+    }
+
     void DumpClass(GraphicsClass& cls) {
         if (cls.dumped) return;
         const uintptr_t container = ResolveContainer(cls);
         if (!container) return;
 
-        uintptr_t fields = 0;
-        uint16_t count = 0;
-        if (!GetReflectionTable(cls, fields, count)) return;
+        uintptr_t typeData = RootTypeData(cls);
+        if (!typeData) return;
+        const uint16_t objectSize = TypeSize(typeData);
 
-        Logger::Log("=== GRAPHICS_VERIFY DUMP %s (%u reflected fields) container=0x%08X ===",
-            cls.alias, static_cast<unsigned>(count), static_cast<unsigned>(container));
+        unsigned totalFields = 0;
+        uintptr_t walk = typeData;
+        for (unsigned depth = 0; walk && depth < 16; ++depth) {
+            uintptr_t fields = 0;
+            uint8_t count = 0;
+            if (!GetDeclaredFields(walk, fields, count)) break;
+            totalFields += count;
+            walk = GetSuperTypeData(walk);
+        }
 
-        for (uint16_t i = 0; i < count; ++i) {
-            const uintptr_t entry = fields + static_cast<uintptr_t>(i) * 12u;
-            if (!Memory::IsReadable(entry, 12)) break;
-            const uintptr_t namePtr = *reinterpret_cast<uintptr_t*>(entry + 0);
-            const std::string name = SafeCString(namePtr);
-            if (name.empty()) continue;
-            const uint16_t off = *reinterpret_cast<uint16_t*>(entry + 6);
-            const uintptr_t typePtr = *reinterpret_cast<uintptr_t*>(entry + 8);
-            const uintptr_t addr = container + off;
-            if (!Memory::IsReadable(addr, 16)) continue;
-            const Kind kind = AutoKind(typePtr);
-            switch (kind) {
-                case Kind::Bool:
-                    Logger::Log("  %s.%s +0x%03X bool=%u", cls.alias, name.c_str(), off,
-                        static_cast<unsigned>(*reinterpret_cast<uint8_t*>(addr)));
-                    break;
-                case Kind::Int:
-                    Logger::Log("  %s.%s +0x%03X int=%d", cls.alias, name.c_str(), off,
-                        *reinterpret_cast<int32_t*>(addr));
-                    break;
-                case Kind::Float:
-                    Logger::Log("  %s.%s +0x%03X float=%.7g", cls.alias, name.c_str(), off,
-                        *reinterpret_cast<float*>(addr));
-                    break;
-                case Kind::Vec2: {
-                    float* p = reinterpret_cast<float*>(addr);
-                    Logger::Log("  %s.%s +0x%03X vec2=(%.5g,%.5g)", cls.alias, name.c_str(), off, p[0], p[1]);
-                    break;
-                }
-                case Kind::Vec4: {
-                    float* p = reinterpret_cast<float*>(addr);
-                    Logger::Log("  %s.%s +0x%03X vec4=(%.5g,%.5g,%.5g,%.5g)", cls.alias, name.c_str(), off, p[0], p[1], p[2], p[3]);
-                    break;
-                }
-                default:
-                    Logger::Log("  %s.%s +0x%03X type=0x%08X raw32=0x%08X", cls.alias, name.c_str(), off,
-                        static_cast<unsigned>(typePtr), static_cast<unsigned>(*reinterpret_cast<uint32_t*>(addr)));
-                    break;
+        Logger::Log("=== GRAPHICS_VERIFY DUMP %s (%u reflected fields incl. inherited, objectSize=0x%X) container=0x%08X ===",
+            cls.alias, totalFields, static_cast<unsigned>(objectSize), static_cast<unsigned>(container));
+
+        walk = typeData;
+        for (unsigned depth = 0; walk && depth < 16; ++depth) {
+            uintptr_t fields = 0;
+            uint8_t count = 0;
+            if (!GetDeclaredFields(walk, fields, count)) break;
+            for (uint8_t i = 0; i < count; ++i) {
+                DumpOneField(cls, container, objectSize,
+                    fields + static_cast<uintptr_t>(i) * 12u, depth != 0);
             }
+            walk = GetSuperTypeData(walk);
         }
         cls.dumped = true;
     }
