@@ -2,7 +2,7 @@ name: Build NFSTR Definitive Edition
 
 on:
   push:
-    branches: [main, graphics-aa-lod-livery-loading]
+    branches: [main, graphics-aa-lod-livery-loading, graphics-upstream-dead-end-verification]
   workflow_dispatch:
 
 permissions:
@@ -70,7 +70,7 @@ jobs:
       - name: Upload compiled ASI
         uses: actions/upload-artifact@v4
         with:
-          name: NFSTR_DefinitiveEdition-graphics-experimental
+          name: NFSTR_DefinitiveEdition-upstream-verification
           path: |
             NFSTR_DefinitiveEdition.asi
             NFSTR_DefinitiveEdition.sha256.txt
