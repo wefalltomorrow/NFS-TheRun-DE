@@ -1,4 +1,5 @@
 #include <windows.h>
+#include <cstring>
 #include <string>
 #include "logger.h"
 #include "config.h"
@@ -9,6 +10,33 @@ namespace Config {
 }
 
 static HMODULE g_hModule = NULL;
+
+namespace {
+    bool IniKeyExists(const char* section, const char* key, const std::string& iniPath) {
+        static const char sentinel[] = "\x1DNFSTR_MISSING\x1D";
+        char value[64] = {};
+        GetPrivateProfileStringA(section, key, sentinel, value,
+                                 static_cast<DWORD>(sizeof(value)), iniPath.c_str());
+        return std::strcmp(value, sentinel) != 0;
+    }
+
+    int EnsureResearchDefaults(const std::string& iniPath) {
+        int added = 0;
+        struct Entry { const char* key; const char* value; };
+        const Entry entries[] = {
+            { "EnableNativeMSAAResearch", "0" },
+            { "EnablePopInQualityResearch", "0" },
+        };
+        for (size_t i = 0; i < sizeof(entries) / sizeof(entries[0]); ++i) {
+            if (IniKeyExists("GRAPHICS_RESEARCH", entries[i].key, iniPath)) continue;
+            if (!WritePrivateProfileStringA("GRAPHICS_RESEARCH", entries[i].key,
+                                            entries[i].value, iniPath.c_str())) return -1;
+            ++added;
+        }
+        WritePrivateProfileStringA(nullptr, nullptr, nullptr, iniPath.c_str());
+        return added;
+    }
+}
 
 DWORD WINAPI MainThread(LPVOID /*lpParam*/) {
     // Determine path of the DLL to locate the INI file alongside it
@@ -25,20 +53,41 @@ DWORD WINAPI MainThread(LPVOID /*lpParam*/) {
     // Keep an existing INI up to date as test builds add settings. Existing keys
     // and values are never overwritten; only genuinely missing defaults are added.
     const int iniDefaultsAdded = Config::EnsureIniDefaults(iniPath);
+    const int researchDefaultsAdded = EnsureResearchDefaults(iniPath);
 
     // 1. Load Configuration
     Config::Load(iniPath);
+
+    // The two paths below are still research and both first become active while a
+    // level renderer is being constructed. Keep them independently gated so a bad
+    // level-load can be bisected without swapping ASIs. AntiAliasing may still say
+    // 4 in an older INI; it is intentionally ignored unless the research gate is on.
+    const bool enableNativeMsaaResearch =
+        GetPrivateProfileIntA("GRAPHICS_RESEARCH", "EnableNativeMSAAResearch", 0, iniPath.c_str()) != 0;
+    const bool enablePopInQualityResearch =
+        GetPrivateProfileIntA("GRAPHICS_RESEARCH", "EnablePopInQualityResearch", 0, iniPath.c_str()) != 0;
+    if (!enableNativeMsaaResearch) g_Config.AntiAliasing = 0;
 
     // 2. Initialize Logger, then log the config (LogSummary must run after Init,
     //    or its output is dropped because the logger isn't ready during Load).
     Logger::Init(logPath, g_Config.DebugLog != 0);
     Logger::Log("NFSTR_DefinitiveEdition thread started.");
-    if (iniDefaultsAdded > 0) {
-        Logger::Log("INI updater added %d missing setting(s) without changing existing values.", iniDefaultsAdded);
-    } else if (iniDefaultsAdded < 0) {
-        Logger::Log("INI updater could not safely write missing settings; existing INI was left in place.");
+    const int totalDefaultsAdded =
+        ((iniDefaultsAdded > 0) ? iniDefaultsAdded : 0) +
+        ((researchDefaultsAdded > 0) ? researchDefaultsAdded : 0);
+    if (totalDefaultsAdded > 0) {
+        Logger::Log("INI updater added %d missing setting(s) without changing existing values.", totalDefaultsAdded);
+    }
+    if (iniDefaultsAdded < 0 || researchDefaultsAdded < 0) {
+        Logger::Log("INI updater could not write one or more missing settings; existing values were left unchanged.");
     }
     Config::LogSummary();
+    Logger::Log("Graphics research gates: NativeMSAA=%d  PopInQuality=%d",
+                enableNativeMsaaResearch ? 1 : 0,
+                enablePopInQualityResearch ? 1 : 0);
+    if (!enableNativeMsaaResearch) {
+        Logger::Log("Native MSAA research is gated OFF; [GRAPHICS_QUALITY] AntiAliasing is ignored for this run.");
+    }
 
     // 3. Initialize Features
     Features::InitGarageCarRender();
@@ -78,8 +127,10 @@ DWORD WINAPI MainThread(LPVOID /*lpParam*/) {
         Features::UpdateTodRandomizer();
         Features::UpdateDifficultyText();
         Features::UpdatePlayerVehicle();  // reads that decision, so it runs after
-        Features::UpdateAntiAliasing();   // containers may reset/recreate on load
-        Features::UpdatePopInQuality();   // aggressive hidden LOD/streaming research
+        Features::UpdateAntiAliasing();   // no-op when native-MSAA research gate is off
+        if (enablePopInQualityResearch) {
+            Features::UpdatePopInQuality();
+        }
         Features::UpdateRenderSettings(); // normal named graphics settings
         // Explicit research overrides run last so an A/B test can override any
         // earlier high-quality default without requiring another ASI build.
