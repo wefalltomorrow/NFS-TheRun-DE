@@ -1,0 +1,35 @@
+name: Build NFSTR Selective Unlocker
+
+on:
+  push:
+    branches: [selective-dlc-unlocker]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install 32-bit MinGW-w64
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y g++-mingw-w64-i686
+      - name: Build ASI
+        run: |
+          i686-w64-mingw32-g++ -shared -O2 -std=c++17 -Wall -Wextra \
+            tools/NFSTR_SelectiveUnlocker/dllmain.cpp \
+            -o NFSTR_SelectiveUnlocker.asi \
+            -lkernel32 -luser32 \
+            -static-libgcc -static-libstdc++
+          file NFSTR_SelectiveUnlocker.asi
+          sha256sum NFSTR_SelectiveUnlocker.asi | tee NFSTR_SelectiveUnlocker.sha256.txt
+      - name: Upload compiled ASI
+        uses: actions/upload-artifact@v4
+        with:
+          name: NFSTR_SelectiveUnlocker
+          path: |
+            NFSTR_SelectiveUnlocker.asi
+            NFSTR_SelectiveUnlocker.sha256.txt
