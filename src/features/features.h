@@ -72,6 +72,10 @@ namespace Features {
     // independent of GameTime and the gameplay simulation-rate fixes.
     void InitLoadingVSyncOptimization();
 
+    // Experimental native Frostbite MSAA path.
+    void InitAntiAliasing();
+    void UpdateAntiAliasing();
+
     // Relaxes track rules (checkpoint timer, OOB reset, wrong-way respawn).
     // All INI-gated and OFF by default.
     void InitTrackRules();
@@ -124,8 +128,8 @@ namespace Features {
     // Logs Ginsu render state for troubleshooting. INI-gated, OFF by default.
     void InitGinsuDiagnostics();
 
-    // Applies fb::GameRenderSettings tweaks (FOV, viewport shift, roll, minimap fix).
-    // Runs from the ticker because the settings pointer is populated lazily.
+    // Applies fb::GameRenderSettings tweaks plus the experimental world/mesh/livery
+    // controls. Runs from the ticker because the settings pointers are lazy.
     void UpdateRenderSettings();
 
     // Holds the player car's health high so damage never reaches the wreck
