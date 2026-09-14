@@ -68,6 +68,10 @@ namespace Features {
     void InitFramerateUnlocker();
     void UpdateFramerateUnlocker();
 
+    // Removes the hardcoded display/VSync pacing used during loading. This is
+    // independent of GameTime and the gameplay simulation-rate fixes.
+    void InitLoadingVSyncOptimization();
+
     // Relaxes track rules (checkpoint timer, OOB reset, wrong-way respawn).
     // All INI-gated and OFF by default.
     void InitTrackRules();
