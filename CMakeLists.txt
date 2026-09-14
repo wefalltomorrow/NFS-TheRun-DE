@@ -16,6 +16,7 @@ set(SOURCES
     src/features/photo_mode.cpp
     src/features/fps_unlocker.cpp
     src/features/loading_vsync.cpp
+    src/features/anti_aliasing.cpp
     src/features/track_rules.cpp
     src/features/traffic.cpp
     src/features/player_vehicle.cpp
