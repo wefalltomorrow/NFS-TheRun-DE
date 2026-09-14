@@ -44,7 +44,9 @@ Both are reapplied when the settings containers become available because the ren
 
 Port of the `VSync` patch in mRally2's Framerate Unlocker cheat table. It modifies only the seven verified instructions in the game's hardcoded display/VSync path around `0x004106F8..0x0041076F`. It does not write `GameTime.MaxSimFps`, `MaxVariableFps` or any simulation-rate field.
 
-The community research describes this patch as removing the hardcoded VSync that slows loading. Because the original patch itself is a low-level display-routine patch rather than a named `LoadingScreen` setting, this remains experimental until loading time and normal presentation behaviour are measured in-game.
+This one is no longer just a graphics experiment. Live testing confirmed the patch applied on the DRM-free PC v1.1 executable and event/level loading became dramatically faster, with no observed gameplay-speed change. It is now being split into its own focused `fast-level-loading` PR for `main` instead of making the stable loading fix wait on the unrelated AA/LOD/livery experiments.
+
+This is also separate from FusionFix's `SkipIntro`: FusionFix speeds up startup/login/boot flow, while this patch removes the hardcoded VSync pacing during actual level loading.
 
 ### ForceMeshLod / MeshGlobalLodScale
 
@@ -65,4 +67,6 @@ Frostbite `WorldRenderSettings::VinylTargetSize` is an int32 at `+0x90`. The bra
 
 ## Test priorities
 
-For MSAA, first verify the log reports both `MultisampleCount -> 4` and `DxMultisampleEnable -> 1`, then load a new event and compare geometry edges. Also watch GPU-memory/performance cost, excessive distant object detail, livery clarity outside the garage, loading-time changes and any VSync/presentation side effects. The features remain on this branch until each one is validated independently.
+For MSAA, first verify the log reports both `MultisampleCount -> 4` and `DxMultisampleEnable -> 1`, then load a new event and compare geometry edges. Also watch GPU-memory/performance cost, excessive distant object detail and livery clarity outside the garage.
+
+The fast-loading VSync bypass has already passed its practical in-game test and is being moved toward `main` separately. AA, forced mesh LOD and livery-target changes remain experimental until each one is validated independently.
