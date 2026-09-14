@@ -60,24 +60,12 @@ namespace {
 }
 
 // ---------------------------------------------------------------------------
-// fb::WorldRenderSettings — shadow settings.
-//
-// Unlike GameRenderSettings this has no static cached pointer, so it is resolved
-// through the settings manager the same way settings_probe.cpp does. It also only
-// exists once a level is loaded, so this quietly does nothing until then.
-//
-// IMPORTANT: these are read once when the renderer initialises a level, because
-// they size the shadow render targets. Changing them mid-race does nothing. That
-// is fine here because the ticker keeps writing them, so the values are already in
-// place the next time a level loads.
-//
-// Motion blur, MSAA and the cascade slice count live in this same object and were
-// wired up at one point, but testing showed none of them do anything in the retail
-// build, so they were removed rather than shipped as settings that quietly fail.
+// Shared SettingsManager resolver for the other Frostbite settings containers.
 namespace {
     const uintptr_t kSettingsManagerPtr   = 0x2446C74; // fb::g_settingsManager
     const uintptr_t kGetContainerFn       = 0x0E72D0;  // SettingsManager::getContainer
     const uintptr_t kWorldRenderTypeInfo  = 0x2AE6E98 - 0x400000;
+    const uintptr_t kMeshTypeInfo         = 0x2AA22C8 - 0x400000;
 
     typedef uintptr_t (__fastcall *GetContainerFn)(uintptr_t self, uintptr_t edx, uintptr_t typeInfo);
 
@@ -95,42 +83,80 @@ namespace {
         return (c < 0x10000) ? 0 : c;
     }
 
-    // WorldRenderSettings offsets, from the game's own reflection data.
-    const uintptr_t kOffShadowmapResolution   = 0x044;
-    const uintptr_t kOffShadowmapQuality      = 0x048;
-    const uintptr_t kOffShadowmapViewDistance = 0x058;
-
-    bool g_LoggedWorld = false;
-
     inline void WriteInt(uintptr_t base, uintptr_t off, int v) {
         int32_t* p = reinterpret_cast<int32_t*>(base + off);
         if (*p != v) *p = v;
     }
+}
+
+// ---------------------------------------------------------------------------
+// fb::WorldRenderSettings — shadows + dynamic vehicle livery target.
+namespace {
+    const uintptr_t kOffShadowmapResolution   = 0x044;
+    const uintptr_t kOffShadowmapQuality      = 0x048;
+    const uintptr_t kOffShadowmapViewDistance = 0x058;
+    const uintptr_t kOffVinylTargetSize       = 0x090;
+
+    bool g_LoggedWorld = false;
 
     void ApplyWorldRender() {
-        if (!g_Config.EnableWorldRenderTweaks) return;
+        const bool wantWorldTweaks = g_Config.EnableWorldRenderTweaks != 0;
+        const bool wantVinyl = g_Config.VinylTargetSize > 0;
+        if (!wantWorldTweaks && !wantVinyl) return;
 
         uintptr_t w = ResolveContainer(kWorldRenderTypeInfo);
         if (!w) return;
 
         if (!g_LoggedWorld) {
-            Logger::Log("World render tweaks: WorldRenderSettings at 0x%08X.", w);
+            Logger::Log("World render tweaks: WorldRenderSettings at 0x%08X (VinylTargetSize was %d).",
+                        w, *reinterpret_cast<int32_t*>(w + kOffVinylTargetSize));
             g_LoggedWorld = true;
         }
 
-        if (g_Config.ShadowmapResolution   > 0) WriteInt(w, kOffShadowmapResolution,   g_Config.ShadowmapResolution);
-        if (g_Config.ShadowmapQuality      >= 0) WriteInt(w, kOffShadowmapQuality,     g_Config.ShadowmapQuality);
-        if (g_Config.ShadowmapViewDistance > 0.0f) WriteFloat(w, kOffShadowmapViewDistance, g_Config.ShadowmapViewDistance);
+        if (wantWorldTweaks) {
+            if (g_Config.ShadowmapResolution   > 0) WriteInt(w, kOffShadowmapResolution,   g_Config.ShadowmapResolution);
+            if (g_Config.ShadowmapQuality      >= 0) WriteInt(w, kOffShadowmapQuality,     g_Config.ShadowmapQuality);
+            if (g_Config.ShadowmapViewDistance > 0.0f) WriteFloat(w, kOffShadowmapViewDistance, g_Config.ShadowmapViewDistance);
+        }
+
+        if (wantVinyl) {
+            WriteInt(w, kOffVinylTargetSize, g_Config.VinylTargetSize);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// fb::MeshSettings — force the highest mesh LOD and push transitions away.
+namespace {
+    const uintptr_t kOffForceLod       = 0x014;
+    const uintptr_t kOffGlobalLodScale = 0x018;
+    bool g_LoggedMesh = false;
+
+    void ApplyMeshQuality() {
+        if (g_Config.ForceMeshLod < 0 && g_Config.MeshGlobalLodScale <= 0.0f) return;
+
+        uintptr_t m = ResolveContainer(kMeshTypeInfo);
+        if (!m) return;
+
+        if (!g_LoggedMesh) {
+            Logger::Log("Mesh quality: MeshSettings at 0x%08X, ForceLod %d -> %d, GlobalLodScale %.3f -> %.3f.",
+                        m,
+                        *reinterpret_cast<int32_t*>(m + kOffForceLod), g_Config.ForceMeshLod,
+                        *reinterpret_cast<float*>(m + kOffGlobalLodScale), g_Config.MeshGlobalLodScale);
+            g_LoggedMesh = true;
+        }
+
+        if (g_Config.ForceMeshLod >= 0) {
+            WriteInt(m, kOffForceLod, g_Config.ForceMeshLod);
+        }
+        if (g_Config.MeshGlobalLodScale > 0.0f) {
+            WriteFloat(m, kOffGlobalLodScale, g_Config.MeshGlobalLodScale);
+        }
     }
 }
 
 // ---------------------------------------------------------------------------
 // fb::ShaderSystemSettings — anisotropic filtering.
-//
-// MaxAnisotropy is an int32 at 0x94, confirmed against the game's own reflection
-// data and read live in ReClass. It ships at 4 and the engine writes it back to 4
-// every time a level loads, so this has to be reapplied rather than set once; the
-// ticker does that for free.
 namespace {
     const uintptr_t kShaderSystemTypeInfo = 0x2AA3428 - 0x400000;
     const uintptr_t kOffMaxAnisotropy     = 0x94;
@@ -157,6 +183,7 @@ namespace {
 namespace Features {
     void UpdateRenderSettings() {
         ApplyWorldRender();
+        ApplyMeshQuality();
         ApplyShaderSystem();
 
         if (!g_Config.EnableRenderTweaks) return;
@@ -170,33 +197,23 @@ namespace Features {
             g_LoggedApply = true;
         }
 
-        // ForceFov applies globally, including the garage, car select and menus,
-        // where a widened view is not wanted. Gate it on the same vehicle-control
-        // flag the sim-rate clamp uses, so the override is live while driving and
-        // released back to the engine's own FOV everywhere else. If the control
-        // hook was never installed we cannot tell, so the override just stays on.
         if (g_Config.ForceFov > 0.0f) {
             bool applyFov = true;
             if (g_Config.ForceFovOnlyWhileDriving) {
                 int state = PlayerControlState();
-                if (state >= 0) applyFov = (state != 0);   // unknown: leave it on
+                if (state >= 0) applyFov = (state != 0);
             }
             WriteFloat(settings, kOffForceFov, applyFov ? g_Config.ForceFov : kFovDisabled);
         }
 
-        // Viewport shift. The enable flag gates both axes; on its own it lifts the
-        // chase camera's viewport slightly.
         WriteBool(settings, kOffForceShiftEnabled, g_Config.ForceRenderShiftEnabled != 0);
         if (g_Config.ForceRenderShiftEnabled) {
             WriteFloat(settings, kOffForceRenderShiftX, g_Config.ForceRenderShiftX);
             WriteFloat(settings, kOffForceRenderShiftY, g_Config.ForceRenderShiftY);
         }
 
-        // Camera roll works independently of the shift enable.
         WriteFloat(settings, kOffForceRoll, g_Config.ForceRoll);
 
-        // InitialClearEnable: clears the render target each frame. Fixes the minimap
-        // rendering glitchy, invisible or missing road segments on some events.
         if (g_Config.FixMinimapRendering) {
             WriteBool(settings, kOffInitialClear, true);
         }

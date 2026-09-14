@@ -41,6 +41,7 @@ DWORD WINAPI MainThread(LPVOID /*lpParam*/) {
     Features::InitTodRandomizer();
     Features::InitGinsuDiagnostics();
     Features::InitLoadingVSyncOptimization();
+    Features::InitAntiAliasing();
     Features::InitFramerateUnlocker();
 
     Logger::Log("All features initialized successfully.");
@@ -58,6 +59,7 @@ DWORD WINAPI MainThread(LPVOID /*lpParam*/) {
         Features::UpdateTodRandomizer();
         Features::UpdateDifficultyText();
         Features::UpdatePlayerVehicle();  // reads that decision, so it runs after
+        Features::UpdateAntiAliasing();   // containers can be recreated on load
         Features::UpdateRenderSettings();
         Features::UpdateSettingsProbe();
         Sleep(16); // ~60 Hz tick

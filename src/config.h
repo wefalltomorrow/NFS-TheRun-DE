@@ -27,9 +27,13 @@ struct ConfigStruct {
     int ClampSimRateWhenNoControl = 1;
 
     // [GRAPHICS_QUALITY]
-    // Removes the game's hardcoded display/VSync pacing during loading. This is
-    // separate from the framerate/simulation system and is enabled by default.
+    // Fast loading is stable/default-on. The remaining fields are experimental
+    // and live on this branch until they are individually validated.
     int FastLoadingVSyncBypass = 1;
+    int AntiAliasing = 4;               // native Frostbite MSAA: 0 off, 2/4/8 samples
+    int ForceMeshLod = 0;               // -1 engine choice, 0 highest LOD, 1+ lower LODs
+    float MeshGlobalLodScale = 1000.0f; // pushes normal LOD transitions far away
+    int VinylTargetSize = 4096;         // dynamic vehicle-livery target size; <=0 leaves stock
 
     // [UI_DEBUG]
     int EnableExtraUIOptions = 0;
@@ -91,8 +95,6 @@ struct ConfigStruct {
 
     // [WORLDRENDER] — fb::WorldRenderSettings. Resolved through the settings
     // manager, not a static pointer. -1 means "leave the engine's own value".
-    // Only the shadow settings are here: motion blur, MSAA and the cascade slice
-    // count were all tested and have no effect in the retail build.
     int EnableWorldRenderTweaks = 0;
     int ShadowmapResolution = -1;        // 2048 at the game's highest preset
     int ShadowmapQuality = -1;           // stock 1; 0 or 2 disable the filtering
