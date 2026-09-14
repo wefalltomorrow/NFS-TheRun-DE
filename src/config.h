@@ -26,6 +26,11 @@ struct ConfigStruct {
     int UnlockCutsceneFPS = 0;
     int ClampSimRateWhenNoControl = 1;
 
+    // [GRAPHICS_QUALITY]
+    // Removes the game's hardcoded display/VSync pacing during loading. This is
+    // separate from the framerate/simulation system and is enabled by default.
+    int FastLoadingVSyncBypass = 1;
+
     // [UI_DEBUG]
     int EnableExtraUIOptions = 0;
     // Forces just the pause menu's photo mode entry visible, without the debug
