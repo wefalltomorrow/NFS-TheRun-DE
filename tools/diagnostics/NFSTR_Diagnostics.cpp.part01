@@ -1,0 +1,190 @@
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#include <tlhelp32.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdarg.h>
+#include <string>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
+#include <algorithm>
+#include <cwctype>
+#include <cstring>
+
+// NFSTR_Diagnostics.asi
+// Standalone x86 diagnostic ASI for Need for Speed: The Run v1.1.0.0.
+// Observes Win32 APIs through IAT hooks. It intentionally does not alter game/Frostbite data.
+
+namespace diag {
+
+static HMODULE g_self = nullptr;
+static HANDLE  g_log = INVALID_HANDLE_VALUE;
+static HANDLE  g_stopEvent = nullptr;
+static CRITICAL_SECTION g_logLock;
+static CRITICAL_SECTION g_stateLock;
+static LARGE_INTEGER g_qpcFreq{};
+static LARGE_INTEGER g_qpcStart{};
+static wchar_t g_modulePath[MAX_PATH]{};
+static wchar_t g_moduleDir[MAX_PATH]{};
+static wchar_t g_iniPath[MAX_PATH]{};
+static wchar_t g_logPath[MAX_PATH]{};
+static wchar_t g_gameDir[MAX_PATH]{};
+static volatile LONG g_callId = 0;
+static volatile LONG g_logStopped = 0;
+static uint64_t g_logBytes = 0;
+
+struct Config {
+    bool enabled = true;
+    bool verbose = true;
+    bool onlyGameDirectory = false;
+    bool logCreates = true;
+    bool logReads = true;
+    bool logSeeks = true;
+    bool logSizes = true;
+    bool logMappings = true;
+    bool logAttributes = true;
+    bool logModules = true;
+    bool logThreads = true;
+    bool logWaits = true;
+    bool logExceptions = true;
+    bool logCloseHandle = false;
+    bool flushImportant = true;
+    DWORD minWaitMs = 25;
+    DWORD moduleScanMs = 250;
+    DWORD maxLogMB = 256;
+} g_cfg;
+
+struct FileState {
+    std::wstring path;
+    uint64_t pos = 0;
+    bool posKnown = false;
+    bool important = false;
+};
+
+struct MappingState {
+    HANDLE file = INVALID_HANDLE_VALUE;
+    std::wstring path;
+    bool important = false;
+};
+
+static std::unordered_map<uintptr_t, FileState> g_files;
+static std::unordered_map<uintptr_t, MappingState> g_mappings;
+static std::unordered_set<uintptr_t> g_patchedModules;
+
+static const uint64_t kFrontEndDeltaOffset = 950432ULL; // 0x000E80A0
+static const uint64_t kFrontEndDeltaSize   = 500944ULL; // 0x0007A4D0
+static const uint64_t kFrontEndDeltaEnd    = kFrontEndDeltaOffset + kFrontEndDeltaSize;
+
+static std::string WideToUtf8(const wchar_t* s) {
+    if (!s || !*s) return std::string();
+    int n = WideCharToMultiByte(CP_UTF8, 0, s, -1, nullptr, 0, nullptr, nullptr);
+    if (n <= 0) return std::string();
+    std::string out((size_t)n, '\0');
+    if (!WideCharToMultiByte(CP_UTF8, 0, s, -1, &out[0], n, nullptr, nullptr)) return std::string();
+    if (!out.empty() && out.back() == '\0') out.pop_back();
+    return out;
+}
+
+static std::wstring AnsiToWide(const char* s) {
+    if (!s || !*s) return std::wstring();
+    int n = MultiByteToWideChar(CP_ACP, 0, s, -1, nullptr, 0);
+    if (n <= 0) return std::wstring();
+    std::wstring out((size_t)n, L'\0');
+    if (!MultiByteToWideChar(CP_ACP, 0, s, -1, &out[0], n)) return std::wstring();
+    if (!out.empty() && out.back() == L'\0') out.pop_back();
+    return out;
+}
+
+static void CopyDirOfPath(const wchar_t* path, wchar_t* out, size_t outCount) {
+    if (!path || !out || outCount == 0) return;
+    wcsncpy(out, path, outCount - 1);
+    out[outCount - 1] = 0;
+    wchar_t* slash1 = wcsrchr(out, L'\\');
+    wchar_t* slash2 = wcsrchr(out, L'/');
+    wchar_t* slash = (slash1 && slash2) ? (slash1 > slash2 ? slash1 : slash2) : (slash1 ? slash1 : slash2);
+    if (slash) *slash = 0;
+}
+
+static bool StartsWithI(const std::wstring& value, const std::wstring& prefix) {
+    if (prefix.empty() || value.size() < prefix.size()) return false;
+    return _wcsnicmp(value.c_str(), prefix.c_str(), prefix.size()) == 0;
+}
+
+static bool ContainsI(const std::wstring& value, const wchar_t* needle) {
+    if (!needle || !*needle) return false;
+    std::wstring a = value;
+    std::wstring b = needle;
+    auto lower = [](wchar_t c) -> wchar_t { return (wchar_t)towlower((wint_t)c); };
+    std::transform(a.begin(), a.end(), a.begin(), lower);
+    std::transform(b.begin(), b.end(), b.begin(), lower);
+    return a.find(b) != std::wstring::npos;
+}
+
+static bool IsFrontEndPath(const std::wstring& path) {
+    return ContainsI(path, L"\\Levels\\FE\\FrontEnd\\FrontEnd.sb") ||
+           ContainsI(path, L"\\Levels\\FE\\FrontEnd\\FrontEnd.toc") ||
+           ContainsI(path, L"/Levels/FE/FrontEnd/FrontEnd.sb") ||
+           ContainsI(path, L"/Levels/FE/FrontEnd/FrontEnd.toc");
+}
+
+static bool IsGamePath(const std::wstring& path) {
+    if (path.empty()) return false;
+    std::wstring game = g_gameDir;
+    if (StartsWithI(path, game)) return true;
+    // Relative paths from the game working directory should also be retained.
+    if (path.find(L":\\") == std::wstring::npos && path.find(L":/") == std::wstring::npos) return true;
+    return false;
+}
+
+static bool RangeOverlapsFrontEndDelta(uint64_t off, uint64_t size) {
+    if (size == 0) return off >= kFrontEndDeltaOffset && off < kFrontEndDeltaEnd;
+    uint64_t end = off + size;
+    if (end < off) end = UINT64_MAX;
+    return off < kFrontEndDeltaEnd && end > kFrontEndDeltaOffset;
+}
+
+static double NowMs() {
+    LARGE_INTEGER q{};
+    QueryPerformanceCounter(&q);
+    return (double)(q.QuadPart - g_qpcStart.QuadPart) * 1000.0 / (double)g_qpcFreq.QuadPart;
+}
+
+static uint64_t NextCallId() {
+    return (uint64_t)(uint32_t)InterlockedIncrement(&g_callId);
+}
+
+static void RawWrite(const char* data, size_t len, bool flush) {
+    if (g_log == INVALID_HANDLE_VALUE || !data || !len || InterlockedCompareExchange(&g_logStopped, 0, 0)) return;
+
+    EnterCriticalSection(&g_logLock);
+    if (!InterlockedCompareExchange(&g_logStopped, 0, 0)) {
+        const uint64_t maxBytes = (uint64_t)g_cfg.maxLogMB * 1024ULL * 1024ULL;
+        if (maxBytes && g_logBytes + len > maxBytes) {
+            const char* msg = "\r\n[LOGGER] Maximum log size reached; further logging disabled.\r\n";
+            DWORD wr = 0;
+            WriteFile(g_log, msg, (DWORD)strlen(msg), &wr, nullptr);
+            FlushFileBuffers(g_log);
+            InterlockedExchange(&g_logStopped, 1);
+        } else {
+            DWORD wr = 0;
+            WriteFile(g_log, data, (DWORD)len, &wr, nullptr);
+            g_logBytes += wr;
+            if (flush) FlushFileBuffers(g_log);
+        }
+    }
+    LeaveCriticalSection(&g_logLock);
+}
+
+static void Logf(bool important, const char* category, const char* fmt, ...) {
+    if (!g_cfg.enabled || g_log == INVALID_HANDLE_VALUE) return;
+    char body[4096];
+    va_list ap;
+    va_start(ap, fmt);
+    _vsnprintf(body, sizeof(body) - 1, fmt, ap);
+    va_end(ap);
+    body[sizeof(body) - 1] = 0;
+
+    char line[4608];
+    const double ms = NowMs();

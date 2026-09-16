@@ -1,0 +1,190 @@
+    SetLastError(err);
+    return h;
+}
+
+static BOOL WINAPI Hook_ReadFile(HANDLE h, LPVOID buffer, DWORD request, LPDWORD bytesRead, LPOVERLAPPED ov) {
+    FileState st = GetFileState(h);
+    bool show = g_cfg.logReads && (st.path.empty() ? !g_cfg.onlyGameDirectory : ShouldLogPath(st.path));
+    uint64_t off = 0;
+    bool offKnown = false;
+    if (ov) {
+        off = ((uint64_t)ov->OffsetHigh << 32) | ov->Offset;
+        offKnown = true;
+    } else if (st.posKnown) {
+        off = st.pos;
+        offKnown = true;
+    }
+    bool delta = st.important && offKnown && RangeOverlapsFrontEndDelta(off, request);
+    bool important = st.important || delta;
+    uint64_t id = NextCallId();
+    double t0 = NowMs();
+    if (show) {
+        if (offKnown)
+            Logf(important, "READ", "#%llu BEGIN ReadFile h=0x%p path=\"%s\" offset=%llu (0x%llX) request=%lu%s",
+                 (unsigned long long)id, h, WideToUtf8(st.path.c_str()).c_str(), (unsigned long long)off,
+                 (unsigned long long)off, (unsigned long)request, delta ? " [FRONTEND-DELTA-OVERLAP]" : "");
+        else
+            Logf(important, "READ", "#%llu BEGIN ReadFile h=0x%p path=\"%s\" offset=<unknown> request=%lu",
+                 (unsigned long long)id, h, WideToUtf8(st.path.c_str()).c_str(), (unsigned long)request);
+    }
+    BOOL ok = Real_ReadFile(h, buffer, request, bytesRead, ov);
+    DWORD err = GetLastError();
+    DWORD got = bytesRead ? *bytesRead : 0;
+    if (ok && !ov) AdvanceFilePos(h, got);
+    if (show) Logf(important, "READ", "#%llu END   ReadFile result=%s bytes=%lu error=%lu duration=%.3fms",
+                   (unsigned long long)id, ok ? "OK" : "FAIL", (unsigned long)got, (unsigned long)err, NowMs() - t0);
+    SetLastError(err);
+    return ok;
+}
+
+static DWORD WINAPI Hook_SetFilePointer(HANDLE h, LONG low, PLONG high, DWORD method) {
+    FileState st = GetFileState(h);
+    bool show = g_cfg.logSeeks && (st.path.empty() ? !g_cfg.onlyGameDirectory : ShouldLogPath(st.path));
+    int64_t move = high ? (((int64_t)*high << 32) | (uint32_t)low) : (int64_t)low;
+    uint64_t id = NextCallId();
+    double t0 = NowMs();
+    if (show) Logf(st.important, "SEEK", "#%llu BEGIN SetFilePointer h=0x%p path=\"%s\" move=%lld method=%lu",
+                   (unsigned long long)id, h, WideToUtf8(st.path.c_str()).c_str(), (long long)move, (unsigned long)method);
+    SetLastError(NO_ERROR);
+    DWORD ret = Real_SetFilePointer(h, low, high, method);
+    DWORD err = GetLastError();
+    bool failed = (ret == INVALID_SET_FILE_POINTER && err != NO_ERROR);
+    if (!failed) {
+        uint64_t pos = high ? (((uint64_t)(uint32_t)*high << 32) | ret) : ret;
+        UpdateFilePos(h, pos, true);
+        bool delta = st.important && RangeOverlapsFrontEndDelta(pos, 1);
+        if (show) Logf(st.important || delta, "SEEK", "#%llu END   SetFilePointer new=%llu (0x%llX)%s error=%lu duration=%.3fms",
+                       (unsigned long long)id, (unsigned long long)pos, (unsigned long long)pos,
+                       delta ? " [FRONTEND-DELTA]" : "", (unsigned long)err, NowMs() - t0);
+    } else if (show) {
+        Logf(st.important, "SEEK", "#%llu END   SetFilePointer FAIL error=%lu duration=%.3fms",
+             (unsigned long long)id, (unsigned long)err, NowMs() - t0);
+    }
+    SetLastError(err);
+    return ret;
+}
+
+static BOOL WINAPI Hook_SetFilePointerEx(HANDLE h, LARGE_INTEGER dist, PLARGE_INTEGER newPos, DWORD method) {
+    FileState st = GetFileState(h);
+    bool show = g_cfg.logSeeks && (st.path.empty() ? !g_cfg.onlyGameDirectory : ShouldLogPath(st.path));
+    uint64_t id = NextCallId();
+    double t0 = NowMs();
+    if (show) Logf(st.important, "SEEK", "#%llu BEGIN SetFilePointerEx h=0x%p path=\"%s\" move=%lld method=%lu",
+                   (unsigned long long)id, h, WideToUtf8(st.path.c_str()).c_str(), (long long)dist.QuadPart, (unsigned long)method);
+    LARGE_INTEGER local{};
+    PLARGE_INTEGER out = newPos ? newPos : &local;
+    BOOL ok = Real_SetFilePointerEx(h, dist, out, method);
+    DWORD err = GetLastError();
+    if (ok) UpdateFilePos(h, (uint64_t)out->QuadPart, true);
+    bool delta = ok && st.important && RangeOverlapsFrontEndDelta((uint64_t)out->QuadPart, 1);
+    if (show) Logf(st.important || delta, "SEEK", "#%llu END   SetFilePointerEx result=%s new=%lld (0x%llX)%s error=%lu duration=%.3fms",
+                   (unsigned long long)id, ok ? "OK" : "FAIL", (long long)out->QuadPart,
+                   (unsigned long long)out->QuadPart, delta ? " [FRONTEND-DELTA]" : "", (unsigned long)err, NowMs() - t0);
+    SetLastError(err);
+    return ok;
+}
+
+static DWORD WINAPI Hook_GetFileSize(HANDLE h, LPDWORD high) {
+    FileState st = GetFileState(h);
+    bool show = g_cfg.logSizes && (st.path.empty() ? !g_cfg.onlyGameDirectory : ShouldLogPath(st.path));
+    uint64_t id = NextCallId();
+    double t0 = NowMs();
+    SetLastError(NO_ERROR);
+    DWORD lo = Real_GetFileSize(h, high);
+    DWORD err = GetLastError();
+    bool failed = (lo == INVALID_FILE_SIZE && err != NO_ERROR);
+    uint64_t size = high ? (((uint64_t)*high << 32) | lo) : lo;
+    if (show) Logf(st.important, "SIZE", "#%llu GetFileSize h=0x%p path=\"%s\" result=%s size=%llu error=%lu duration=%.3fms",
+                   (unsigned long long)id, h, WideToUtf8(st.path.c_str()).c_str(), failed ? "FAIL" : "OK",
+                   (unsigned long long)size, (unsigned long)err, NowMs() - t0);
+    SetLastError(err);
+    return lo;
+}
+
+static BOOL WINAPI Hook_GetFileSizeEx(HANDLE h, PLARGE_INTEGER size) {
+    FileState st = GetFileState(h);
+    bool show = g_cfg.logSizes && (st.path.empty() ? !g_cfg.onlyGameDirectory : ShouldLogPath(st.path));
+    uint64_t id = NextCallId();
+    double t0 = NowMs();
+    BOOL ok = Real_GetFileSizeEx(h, size);
+    DWORD err = GetLastError();
+    if (show) Logf(st.important, "SIZE", "#%llu GetFileSizeEx h=0x%p path=\"%s\" result=%s size=%lld error=%lu duration=%.3fms",
+                   (unsigned long long)id, h, WideToUtf8(st.path.c_str()).c_str(), ok ? "OK" : "FAIL",
+                   size ? (long long)size->QuadPart : -1LL, (unsigned long)err, NowMs() - t0);
+    SetLastError(err);
+    return ok;
+}
+
+static HANDLE WINAPI Hook_CreateFileMappingW(HANDLE hFile, LPSECURITY_ATTRIBUTES sa, DWORD protect, DWORD high, DWORD low, LPCWSTR name) {
+    FileState fs = GetFileState(hFile);
+    bool show = g_cfg.logMappings && (fs.path.empty() ? !g_cfg.onlyGameDirectory : ShouldLogPath(fs.path));
+    uint64_t maxSize = ((uint64_t)high << 32) | low;
+    uint64_t id = NextCallId();
+    double t0 = NowMs();
+    if (show) Logf(fs.important, "MAP", "#%llu BEGIN CreateFileMappingW file=0x%p path=\"%s\" protect=0x%08lX maxSize=%llu name=\"%s\"",
+                   (unsigned long long)id, hFile, WideToUtf8(fs.path.c_str()).c_str(), (unsigned long)protect,
+                   (unsigned long long)maxSize, WideToUtf8(name ? name : L"").c_str());
+    HANDLE m = Real_CreateFileMappingW(hFile, sa, protect, high, low, name);
+    DWORD err = GetLastError();
+    if (m) {
+        MappingState ms; ms.file = hFile; ms.path = fs.path; ms.important = fs.important;
+        EnterCriticalSection(&g_stateLock); g_mappings[(uintptr_t)m] = ms; LeaveCriticalSection(&g_stateLock);
+    }
+    if (show) Logf(fs.important, "MAP", "#%llu END   CreateFileMappingW mapping=0x%p result=%s error=%lu duration=%.3fms",
+                   (unsigned long long)id, m, m ? "OK" : "FAIL", (unsigned long)err, NowMs() - t0);
+    SetLastError(err);
+    return m;
+}
+
+static HANDLE WINAPI Hook_CreateFileMappingA(HANDLE hFile, LPSECURITY_ATTRIBUTES sa, DWORD protect, DWORD high, DWORD low, LPCSTR name) {
+    FileState fs = GetFileState(hFile);
+    bool show = g_cfg.logMappings && (fs.path.empty() ? !g_cfg.onlyGameDirectory : ShouldLogPath(fs.path));
+    uint64_t maxSize = ((uint64_t)high << 32) | low;
+    uint64_t id = NextCallId();
+    double t0 = NowMs();
+    if (show) Logf(fs.important, "MAP", "#%llu BEGIN CreateFileMappingA file=0x%p path=\"%s\" protect=0x%08lX maxSize=%llu name=\"%s\"",
+                   (unsigned long long)id, hFile, WideToUtf8(fs.path.c_str()).c_str(), (unsigned long)protect,
+                   (unsigned long long)maxSize, name ? name : "");
+    HANDLE m = Real_CreateFileMappingA(hFile, sa, protect, high, low, name);
+    DWORD err = GetLastError();
+    if (m) {
+        MappingState ms; ms.file = hFile; ms.path = fs.path; ms.important = fs.important;
+        EnterCriticalSection(&g_stateLock); g_mappings[(uintptr_t)m] = ms; LeaveCriticalSection(&g_stateLock);
+    }
+    if (show) Logf(fs.important, "MAP", "#%llu END   CreateFileMappingA mapping=0x%p result=%s error=%lu duration=%.3fms",
+                   (unsigned long long)id, m, m ? "OK" : "FAIL", (unsigned long)err, NowMs() - t0);
+    SetLastError(err);
+    return m;
+}
+
+static LPVOID WINAPI Hook_MapViewOfFile(HANDLE mapping, DWORD access, DWORD offHigh, DWORD offLow, SIZE_T size) {
+    MappingState ms = GetMappingState(mapping);
+    uint64_t off = ((uint64_t)offHigh << 32) | offLow;
+    bool show = g_cfg.logMappings && (ms.path.empty() ? !g_cfg.onlyGameDirectory : ShouldLogPath(ms.path));
+    bool delta = ms.important && RangeOverlapsFrontEndDelta(off, (uint64_t)size);
+    uint64_t id = NextCallId();
+    double t0 = NowMs();
+    if (show) Logf(ms.important || delta, "MAP", "#%llu BEGIN MapViewOfFile mapping=0x%p path=\"%s\" access=0x%08lX offset=%llu (0x%llX) size=%llu%s",
+                   (unsigned long long)id, mapping, WideToUtf8(ms.path.c_str()).c_str(), (unsigned long)access,
+                   (unsigned long long)off, (unsigned long long)off, (unsigned long long)size,
+                   delta ? " [FRONTEND-DELTA-OVERLAP]" : "");
+    LPVOID p = Real_MapViewOfFile(mapping, access, offHigh, offLow, size);
+    DWORD err = GetLastError();
+    if (show) Logf(ms.important || delta, "MAP", "#%llu END   MapViewOfFile ptr=0x%p result=%s error=%lu duration=%.3fms",
+                   (unsigned long long)id, p, p ? "OK" : "FAIL", (unsigned long)err, NowMs() - t0);
+    SetLastError(err);
+    return p;
+}
+
+static LPVOID WINAPI Hook_MapViewOfFileEx(HANDLE mapping, DWORD access, DWORD offHigh, DWORD offLow, SIZE_T size, LPVOID base) {
+    MappingState ms = GetMappingState(mapping);
+    uint64_t off = ((uint64_t)offHigh << 32) | offLow;
+    bool show = g_cfg.logMappings && (ms.path.empty() ? !g_cfg.onlyGameDirectory : ShouldLogPath(ms.path));
+    bool delta = ms.important && RangeOverlapsFrontEndDelta(off, (uint64_t)size);
+    uint64_t id = NextCallId();
+    double t0 = NowMs();
+    if (show) Logf(ms.important || delta, "MAP", "#%llu BEGIN MapViewOfFileEx mapping=0x%p path=\"%s\" access=0x%08lX offset=%llu (0x%llX) size=%llu base=0x%p%s",
+                   (unsigned long long)id, mapping, WideToUtf8(ms.path.c_str()).c_str(), (unsigned long)access,
+                   (unsigned long long)off, (unsigned long long)off, (unsigned long long)size, base,
+                   delta ? " [FRONTEND-DELTA-OVERLAP]" : "");
+    LPVOID p = Real_MapViewOfFileEx(mapping, access, offHigh, offLow, size, base);
