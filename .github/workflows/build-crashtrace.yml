@@ -1,0 +1,42 @@
+name: Build NFSTR Crash Trace
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-crashtrace:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install 32-bit MinGW-w64
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y g++-mingw-w64-i686
+
+      - name: Build crash trace ASI v0.5.0
+        shell: bash
+        run: |
+          i686-w64-mingw32-g++ -shared -O2 -std=c++17 -Wall -Wextra \
+            -D_WIN32_WINNT=0x0601 -DWINVER=0x0601 \
+            tools/diagnostics/NFSTR_CrashTrace_v0.5.0.cpp \
+            -o NFSTR_CrashTrace.asi \
+            -lkernel32 -luser32 \
+            -static-libgcc -static-libstdc++
+          file NFSTR_CrashTrace.asi
+          sha256sum NFSTR_CrashTrace.asi | tee NFSTR_CrashTrace.sha256.txt
+
+      - name: Upload crash trace ASI v0.5.0
+        uses: actions/upload-artifact@v4
+        with:
+          name: NFSTR_CrashTrace-v0.5.0
+          path: |
+            NFSTR_CrashTrace.asi
+            NFSTR_CrashTrace.sha256.txt
+            tools/diagnostics/NFSTR_CrashTrace_v0.5.0.cpp
