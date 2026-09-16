@@ -1,0 +1,190 @@
+    const DWORD tid = GetCurrentThreadId();
+    _snprintf(line, sizeof(line) - 1, "[%011.3f] [TID %5lu] [%s]%s %s\r\n",
+              ms, (unsigned long)tid, category ? category : "GEN", important ? " [IMPORTANT]" : "", body);
+    line[sizeof(line) - 1] = 0;
+    RawWrite(line, strlen(line), important && g_cfg.flushImportant);
+}
+
+static int ReadInt(const wchar_t* section, const wchar_t* key, int def) {
+    return (int)GetPrivateProfileIntW(section, key, def, g_iniPath);
+}
+
+static void LoadConfig() {
+    g_cfg.enabled           = ReadInt(L"Diagnostics", L"Enabled", 1) != 0;
+    g_cfg.verbose           = ReadInt(L"Diagnostics", L"Verbose", 1) != 0;
+    g_cfg.onlyGameDirectory = ReadInt(L"Diagnostics", L"OnlyGameDirectory", 0) != 0;
+    g_cfg.maxLogMB          = (DWORD)ReadInt(L"Diagnostics", L"MaxLogMB", 256);
+
+    g_cfg.logCreates        = ReadInt(L"FileIO", L"LogCreates", 1) != 0;
+    g_cfg.logReads          = ReadInt(L"FileIO", L"LogReads", 1) != 0;
+    g_cfg.logSeeks          = ReadInt(L"FileIO", L"LogSeeks", 1) != 0;
+    g_cfg.logSizes          = ReadInt(L"FileIO", L"LogSizes", 1) != 0;
+    g_cfg.logMappings       = ReadInt(L"FileIO", L"LogMappings", 1) != 0;
+    g_cfg.logAttributes     = ReadInt(L"FileIO", L"LogAttributes", 1) != 0;
+    g_cfg.logCloseHandle    = ReadInt(L"FileIO", L"LogCloseHandle", 0) != 0;
+
+    g_cfg.logModules        = ReadInt(L"Runtime", L"LogModules", 1) != 0;
+    g_cfg.logThreads        = ReadInt(L"Runtime", L"LogThreads", 1) != 0;
+    g_cfg.logWaits          = ReadInt(L"Runtime", L"LogWaits", 1) != 0;
+    g_cfg.logExceptions     = ReadInt(L"Runtime", L"LogExceptions", 1) != 0;
+    g_cfg.minWaitMs         = (DWORD)ReadInt(L"Runtime", L"MinWaitMs", 25);
+    g_cfg.moduleScanMs      = (DWORD)ReadInt(L"Runtime", L"ModuleScanMs", 250);
+    if (g_cfg.moduleScanMs < 50) g_cfg.moduleScanMs = 50;
+    g_cfg.flushImportant    = ReadInt(L"Diagnostics", L"FlushImportant", 1) != 0;
+}
+
+
+static bool ShouldLogPath(const std::wstring& path) {
+    if (!g_cfg.onlyGameDirectory) return true;
+    return IsGamePath(path);
+}
+
+static FileState GetFileState(HANDLE h) {
+    FileState out;
+    EnterCriticalSection(&g_stateLock);
+    auto it = g_files.find((uintptr_t)h);
+    if (it != g_files.end()) out = it->second;
+    LeaveCriticalSection(&g_stateLock);
+    return out;
+}
+
+static void PutFileState(HANDLE h, const FileState& st) {
+    if (!h || h == INVALID_HANDLE_VALUE) return;
+    EnterCriticalSection(&g_stateLock);
+    g_files[(uintptr_t)h] = st;
+    LeaveCriticalSection(&g_stateLock);
+}
+
+static void UpdateFilePos(HANDLE h, uint64_t pos, bool known) {
+    EnterCriticalSection(&g_stateLock);
+    auto it = g_files.find((uintptr_t)h);
+    if (it != g_files.end()) {
+        it->second.pos = pos;
+        it->second.posKnown = known;
+    }
+    LeaveCriticalSection(&g_stateLock);
+}
+
+static void AdvanceFilePos(HANDLE h, uint64_t count) {
+    EnterCriticalSection(&g_stateLock);
+    auto it = g_files.find((uintptr_t)h);
+    if (it != g_files.end() && it->second.posKnown) it->second.pos += count;
+    LeaveCriticalSection(&g_stateLock);
+}
+
+static MappingState GetMappingState(HANDLE h) {
+    MappingState out;
+    EnterCriticalSection(&g_stateLock);
+    auto it = g_mappings.find((uintptr_t)h);
+    if (it != g_mappings.end()) out = it->second;
+    LeaveCriticalSection(&g_stateLock);
+    return out;
+}
+
+static std::string ModuleAndRva(void* address) {
+    MEMORY_BASIC_INFORMATION mbi{};
+    if (!address || !VirtualQuery(address, &mbi, sizeof(mbi))) return "<unknown>";
+    HMODULE mod = (HMODULE)mbi.AllocationBase;
+    wchar_t path[MAX_PATH]{};
+    if (!GetModuleFileNameW(mod, path, MAX_PATH)) return "<unknown>";
+    const char* baseNameW = nullptr;
+    (void)baseNameW;
+    std::string p = WideToUtf8(path);
+    size_t slash = p.find_last_of("\\/");
+    if (slash != std::string::npos) p = p.substr(slash + 1);
+    uintptr_t rva = (uintptr_t)address - (uintptr_t)mod;
+    char out[512];
+    _snprintf(out, sizeof(out), "%s+0x%08lX", p.c_str(), (unsigned long)rva);
+    return out;
+}
+
+// Direct Win32 targets. Calls from this DLL go through our own unpatched IAT,
+// but keeping explicit pointers makes intent clear and avoids chaining through a patched caller IAT.
+using PFN_CreateFileW = HANDLE (WINAPI*)(LPCWSTR,DWORD,DWORD,LPSECURITY_ATTRIBUTES,DWORD,DWORD,HANDLE);
+using PFN_CreateFileA = HANDLE (WINAPI*)(LPCSTR,DWORD,DWORD,LPSECURITY_ATTRIBUTES,DWORD,DWORD,HANDLE);
+using PFN_ReadFile = BOOL (WINAPI*)(HANDLE,LPVOID,DWORD,LPDWORD,LPOVERLAPPED);
+using PFN_SetFilePointer = DWORD (WINAPI*)(HANDLE,LONG,PLONG,DWORD);
+using PFN_SetFilePointerEx = BOOL (WINAPI*)(HANDLE,LARGE_INTEGER,PLARGE_INTEGER,DWORD);
+using PFN_GetFileSize = DWORD (WINAPI*)(HANDLE,LPDWORD);
+using PFN_GetFileSizeEx = BOOL (WINAPI*)(HANDLE,PLARGE_INTEGER);
+using PFN_CreateFileMappingW = HANDLE (WINAPI*)(HANDLE,LPSECURITY_ATTRIBUTES,DWORD,DWORD,DWORD,LPCWSTR);
+using PFN_CreateFileMappingA = HANDLE (WINAPI*)(HANDLE,LPSECURITY_ATTRIBUTES,DWORD,DWORD,DWORD,LPCSTR);
+using PFN_MapViewOfFile = LPVOID (WINAPI*)(HANDLE,DWORD,DWORD,DWORD,SIZE_T);
+using PFN_MapViewOfFileEx = LPVOID (WINAPI*)(HANDLE,DWORD,DWORD,DWORD,SIZE_T,LPVOID);
+using PFN_UnmapViewOfFile = BOOL (WINAPI*)(LPCVOID);
+using PFN_CloseHandle = BOOL (WINAPI*)(HANDLE);
+using PFN_GetFileAttributesW = DWORD (WINAPI*)(LPCWSTR);
+using PFN_GetFileAttributesA = DWORD (WINAPI*)(LPCSTR);
+using PFN_GetFileAttributesExW = BOOL (WINAPI*)(LPCWSTR,GET_FILEEX_INFO_LEVELS,LPVOID);
+using PFN_GetFileAttributesExA = BOOL (WINAPI*)(LPCSTR,GET_FILEEX_INFO_LEVELS,LPVOID);
+using PFN_LoadLibraryW = HMODULE (WINAPI*)(LPCWSTR);
+using PFN_LoadLibraryA = HMODULE (WINAPI*)(LPCSTR);
+using PFN_LoadLibraryExW = HMODULE (WINAPI*)(LPCWSTR,HANDLE,DWORD);
+using PFN_LoadLibraryExA = HMODULE (WINAPI*)(LPCSTR,HANDLE,DWORD);
+using PFN_CreateThread = HANDLE (WINAPI*)(LPSECURITY_ATTRIBUTES,SIZE_T,LPTHREAD_START_ROUTINE,LPVOID,DWORD,LPDWORD);
+using PFN_WaitForSingleObject = DWORD (WINAPI*)(HANDLE,DWORD);
+using PFN_WaitForMultipleObjects = DWORD (WINAPI*)(DWORD,const HANDLE*,BOOL,DWORD);
+
+static PFN_CreateFileW Real_CreateFileW = ::CreateFileW;
+static PFN_CreateFileA Real_CreateFileA = ::CreateFileA;
+static PFN_ReadFile Real_ReadFile = ::ReadFile;
+static PFN_SetFilePointer Real_SetFilePointer = ::SetFilePointer;
+static PFN_SetFilePointerEx Real_SetFilePointerEx = ::SetFilePointerEx;
+static PFN_GetFileSize Real_GetFileSize = ::GetFileSize;
+static PFN_GetFileSizeEx Real_GetFileSizeEx = ::GetFileSizeEx;
+static PFN_CreateFileMappingW Real_CreateFileMappingW = ::CreateFileMappingW;
+static PFN_CreateFileMappingA Real_CreateFileMappingA = ::CreateFileMappingA;
+static PFN_MapViewOfFile Real_MapViewOfFile = ::MapViewOfFile;
+static PFN_MapViewOfFileEx Real_MapViewOfFileEx = ::MapViewOfFileEx;
+static PFN_UnmapViewOfFile Real_UnmapViewOfFile = ::UnmapViewOfFile;
+static PFN_CloseHandle Real_CloseHandle = ::CloseHandle;
+static PFN_GetFileAttributesW Real_GetFileAttributesW = ::GetFileAttributesW;
+static PFN_GetFileAttributesA Real_GetFileAttributesA = ::GetFileAttributesA;
+static PFN_GetFileAttributesExW Real_GetFileAttributesExW = ::GetFileAttributesExW;
+static PFN_GetFileAttributesExA Real_GetFileAttributesExA = ::GetFileAttributesExA;
+static PFN_LoadLibraryW Real_LoadLibraryW = ::LoadLibraryW;
+static PFN_LoadLibraryA Real_LoadLibraryA = ::LoadLibraryA;
+static PFN_LoadLibraryExW Real_LoadLibraryExW = ::LoadLibraryExW;
+static PFN_LoadLibraryExA Real_LoadLibraryExA = ::LoadLibraryExA;
+static PFN_CreateThread Real_CreateThread = ::CreateThread;
+static PFN_WaitForSingleObject Real_WaitForSingleObject = ::WaitForSingleObject;
+static PFN_WaitForMultipleObjects Real_WaitForMultipleObjects = ::WaitForMultipleObjects;
+
+static HANDLE WINAPI Hook_CreateFileW(LPCWSTR name, DWORD access, DWORD share, LPSECURITY_ATTRIBUTES sa, DWORD creation, DWORD flags, HANDLE templ) {
+    std::wstring path = name ? name : L"<null>";
+    bool important = IsFrontEndPath(path);
+    bool show = g_cfg.logCreates && ShouldLogPath(path);
+    uint64_t id = NextCallId();
+    double t0 = NowMs();
+    if (show) Logf(important, "FILE", "#%llu BEGIN CreateFileW path=\"%s\" access=0x%08lX share=0x%08lX creation=%lu flags=0x%08lX",
+                   (unsigned long long)id, WideToUtf8(path.c_str()).c_str(), (unsigned long)access, (unsigned long)share,
+                   (unsigned long)creation, (unsigned long)flags);
+    HANDLE h = Real_CreateFileW(name, access, share, sa, creation, flags, templ);
+    DWORD err = GetLastError();
+    if (h != INVALID_HANDLE_VALUE) {
+        FileState st; st.path = path; st.important = important; st.pos = 0; st.posKnown = true;
+        PutFileState(h, st);
+    }
+    if (show) Logf(important, "FILE", "#%llu END   CreateFileW handle=0x%p result=%s error=%lu duration=%.3fms",
+                   (unsigned long long)id, h, h == INVALID_HANDLE_VALUE ? "FAIL" : "OK", (unsigned long)err, NowMs() - t0);
+    SetLastError(err);
+    return h;
+}
+
+static HANDLE WINAPI Hook_CreateFileA(LPCSTR name, DWORD access, DWORD share, LPSECURITY_ATTRIBUTES sa, DWORD creation, DWORD flags, HANDLE templ) {
+    std::wstring path = AnsiToWide(name ? name : "<null>");
+    bool important = IsFrontEndPath(path);
+    bool show = g_cfg.logCreates && ShouldLogPath(path);
+    uint64_t id = NextCallId();
+    double t0 = NowMs();
+    if (show) Logf(important, "FILE", "#%llu BEGIN CreateFileA path=\"%s\" access=0x%08lX share=0x%08lX creation=%lu flags=0x%08lX",
+                   (unsigned long long)id, name ? name : "<null>", (unsigned long)access, (unsigned long)share,
+                   (unsigned long)creation, (unsigned long)flags);
+    HANDLE h = Real_CreateFileA(name, access, share, sa, creation, flags, templ);
+    DWORD err = GetLastError();
+    if (h != INVALID_HANDLE_VALUE) {
+        FileState st; st.path = path; st.important = important; st.pos = 0; st.posKnown = true;
+        PutFileState(h, st);
+    }
+    if (show) Logf(important, "FILE", "#%llu END   CreateFileA handle=0x%p result=%s error=%lu duration=%.3fms",
+                   (unsigned long long)id, h, h == INVALID_HANDLE_VALUE ? "FAIL" : "OK", (unsigned long)err, NowMs() - t0);
