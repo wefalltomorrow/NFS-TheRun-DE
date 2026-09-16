@@ -75,3 +75,28 @@ jobs:
           path: |
             NFSTR_DefinitiveEdition.asi
             NFSTR_DefinitiveEdition.sha256.txt
+
+      - name: Build diagnostics ASI v0.2.0
+        shell: bash
+        run: |
+          cp tools/diagnostics/NFSTR_Diagnostics_v0.2.0.cpp NFSTR_Diagnostics.cpp
+          i686-w64-mingw32-g++ -shared -O2 -std=c++17 -Wall -Wextra \
+            -D_WIN32_WINNT=0x0601 -DWINVER=0x0601 \
+            NFSTR_Diagnostics.cpp \
+            -o NFSTR_Diagnostics.asi \
+            -lkernel32 \
+            -static-libgcc -static-libstdc++
+          file NFSTR_Diagnostics.asi
+          sha256sum NFSTR_Diagnostics.asi | tee NFSTR_Diagnostics.sha256.txt
+          cp tools/diagnostics/NFSTR_Diagnostics_v0.2.0.ini NFSTR_Diagnostics.ini
+
+      - name: Upload diagnostics ASI v0.2.0
+        uses: actions/upload-artifact@v4
+        with:
+          name: NFSTR_Diagnostics-v0.2.0
+          path: |
+            NFSTR_Diagnostics.asi
+            NFSTR_Diagnostics.sha256.txt
+            NFSTR_Diagnostics.ini
+            tools/diagnostics/NFSTR_Diagnostics_v0.2.0.cpp
+            tools/diagnostics/README_v0.2.0.txt
