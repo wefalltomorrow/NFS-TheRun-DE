@@ -1,0 +1,167 @@
+    // Mark early to avoid reentrant duplicate work.
+    g_patchedModules.insert((uintptr_t)module);
+    LeaveCriticalSection(&g_stateLock);
+
+    auto base = (uint8_t*)module;
+    auto dos = (IMAGE_DOS_HEADER*)base;
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE) return 0;
+    auto nt = (IMAGE_NT_HEADERS*)(base + dos->e_lfanew);
+    if (nt->Signature != IMAGE_NT_SIGNATURE) return 0;
+    if (nt->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR32_MAGIC) return 0;
+
+    const auto& dir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+    if (!dir.VirtualAddress || !dir.Size) return 0;
+
+    int patched = 0;
+    auto desc = (IMAGE_IMPORT_DESCRIPTOR*)(base + dir.VirtualAddress);
+    for (; desc->Name; ++desc) {
+        auto first = (IMAGE_THUNK_DATA*)(base + desc->FirstThunk);
+        auto orig  = desc->OriginalFirstThunk ? (IMAGE_THUNK_DATA*)(base + desc->OriginalFirstThunk) : nullptr;
+        if (!first || !orig) continue;
+
+        for (; orig->u1.AddressOfData; ++orig, ++first) {
+            if (IMAGE_SNAP_BY_ORDINAL(orig->u1.Ordinal)) continue;
+            auto ibn = (IMAGE_IMPORT_BY_NAME*)(base + orig->u1.AddressOfData);
+            const char* name = (const char*)ibn->Name;
+            void* replacement = HookForName(name);
+            if (!replacement) continue;
+
+            DWORD old = 0;
+            if (VirtualProtect(&first->u1.Function, sizeof(uintptr_t), PAGE_READWRITE, &old)) {
+                first->u1.Function = (uintptr_t)replacement;
+                DWORD ignored = 0;
+                VirtualProtect(&first->u1.Function, sizeof(uintptr_t), old, &ignored);
+                FlushInstructionCache(GetCurrentProcess(), &first->u1.Function, sizeof(uintptr_t));
+                ++patched;
+            }
+        }
+    }
+
+    if (patched && g_cfg.logModules) {
+        wchar_t p[MAX_PATH]{}; GetModuleFileNameW(module, p, MAX_PATH);
+        Logf(false, "HOOK", "Patched %d imports in module=0x%p \"%s\"", patched, module, WideToUtf8(p).c_str());
+    }
+    return patched;
+}
+
+static int PatchLoadedModules() {
+    int total = 0;
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, GetCurrentProcessId());
+    if (snap == INVALID_HANDLE_VALUE) return 0;
+    MODULEENTRY32W me{}; me.dwSize = sizeof(me);
+    if (Module32FirstW(snap, &me)) {
+        do { total += PatchModuleIAT(me.hModule); } while (Module32NextW(snap, &me));
+    }
+    CloseHandle(snap);
+    return total;
+}
+
+static LONG CALLBACK VectoredHandler(PEXCEPTION_POINTERS ep) {
+    if (!g_cfg.logExceptions || !ep || !ep->ExceptionRecord || !ep->ContextRecord) return EXCEPTION_CONTINUE_SEARCH;
+    DWORD code = ep->ExceptionRecord->ExceptionCode;
+    switch (code) {
+        case EXCEPTION_ACCESS_VIOLATION:
+        case EXCEPTION_ILLEGAL_INSTRUCTION:
+        case EXCEPTION_PRIV_INSTRUCTION:
+        case EXCEPTION_STACK_OVERFLOW:
+        case EXCEPTION_INT_DIVIDE_BY_ZERO:
+        case EXCEPTION_FLT_DIVIDE_BY_ZERO:
+        case EXCEPTION_BREAKPOINT:
+            break;
+        default:
+            return EXCEPTION_CONTINUE_SEARCH;
+    }
+#if defined(_M_IX86) || defined(__i386__)
+    CONTEXT* c = ep->ContextRecord;
+    Logf(true, "EXCEPT", "code=0x%08lX address=0x%p (%s) EIP=0x%08lX ESP=0x%08lX EBP=0x%08lX EAX=0x%08lX EBX=0x%08lX ECX=0x%08lX EDX=0x%08lX ESI=0x%08lX EDI=0x%08lX flags=0x%08lX",
+         (unsigned long)code, ep->ExceptionRecord->ExceptionAddress, ModuleAndRva(ep->ExceptionRecord->ExceptionAddress).c_str(),
+         (unsigned long)c->Eip, (unsigned long)c->Esp, (unsigned long)c->Ebp, (unsigned long)c->Eax,
+         (unsigned long)c->Ebx, (unsigned long)c->Ecx, (unsigned long)c->Edx, (unsigned long)c->Esi,
+         (unsigned long)c->Edi, (unsigned long)c->EFlags);
+#else
+    Logf(true, "EXCEPT", "code=0x%08lX address=0x%p (%s)", (unsigned long)code,
+         ep->ExceptionRecord->ExceptionAddress, ModuleAndRva(ep->ExceptionRecord->ExceptionAddress).c_str());
+#endif
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
+static void LogEnvironment() {
+    wchar_t exe[MAX_PATH]{}; GetModuleFileNameW(nullptr, exe, MAX_PATH);
+    wchar_t cwd[MAX_PATH]{}; GetCurrentDirectoryW(MAX_PATH, cwd);
+    Logf(true, "INIT", "NFSTR Diagnostics v0.1.0 loaded successfully");
+    Logf(false, "INIT", "EXE=\"%s\"", WideToUtf8(exe).c_str());
+    Logf(false, "INIT", "ASI=\"%s\"", WideToUtf8(g_modulePath).c_str());
+    Logf(false, "INIT", "CWD=\"%s\"", WideToUtf8(cwd).c_str());
+    Logf(false, "INIT", "GameDir=\"%s\"", WideToUtf8(g_gameDir).c_str());
+    Logf(false, "INIT", "PID=%lu processBase=0x%p pointerSize=%u", (unsigned long)GetCurrentProcessId(), GetModuleHandleW(nullptr), (unsigned)sizeof(void*));
+    Logf(false, "INIT", "FrontEnd delta watch: offset=%llu (0x%llX), slot=%llu (0x%llX), end=%llu (0x%llX)",
+         (unsigned long long)kFrontEndDeltaOffset, (unsigned long long)kFrontEndDeltaOffset,
+         (unsigned long long)kFrontEndDeltaSize, (unsigned long long)kFrontEndDeltaSize,
+         (unsigned long long)kFrontEndDeltaEnd, (unsigned long long)kFrontEndDeltaEnd);
+    Logf(false, "CONFIG", "Verbose=%d OnlyGameDirectory=%d MaxLogMB=%lu", g_cfg.verbose, g_cfg.onlyGameDirectory, (unsigned long)g_cfg.maxLogMB);
+    Logf(false, "CONFIG", "FileIO creates=%d reads=%d seeks=%d sizes=%d mappings=%d attributes=%d close=%d",
+         g_cfg.logCreates, g_cfg.logReads, g_cfg.logSeeks, g_cfg.logSizes, g_cfg.logMappings, g_cfg.logAttributes, g_cfg.logCloseHandle);
+    Logf(false, "CONFIG", "Runtime modules=%d threads=%d waits=%d exceptions=%d MinWaitMs=%lu ModuleScanMs=%lu",
+         g_cfg.logModules, g_cfg.logThreads, g_cfg.logWaits, g_cfg.logExceptions,
+         (unsigned long)g_cfg.minWaitMs, (unsigned long)g_cfg.moduleScanMs);
+}
+
+static DWORD WINAPI WorkerThread(LPVOID) {
+    InitializeCriticalSection(&g_logLock);
+    InitializeCriticalSection(&g_stateLock);
+    QueryPerformanceFrequency(&g_qpcFreq);
+    QueryPerformanceCounter(&g_qpcStart);
+
+    GetModuleFileNameW(g_self, g_modulePath, MAX_PATH);
+    CopyDirOfPath(g_modulePath, g_moduleDir, MAX_PATH);
+    GetModuleFileNameW(nullptr, g_gameDir, MAX_PATH);
+    wchar_t tmp[MAX_PATH]{};
+    CopyDirOfPath(g_gameDir, tmp, MAX_PATH);
+    wcsncpy(g_gameDir, tmp, MAX_PATH - 1);
+
+    _snwprintf(g_iniPath, MAX_PATH - 1, L"%s\\NFSTR_Diagnostics.ini", g_moduleDir);
+    _snwprintf(g_logPath, MAX_PATH - 1, L"%s\\NFSTR_Diagnostics.log", g_moduleDir);
+    g_iniPath[MAX_PATH - 1] = 0;
+    g_logPath[MAX_PATH - 1] = 0;
+    LoadConfig();
+
+    g_log = CreateFileW(g_logPath, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, CREATE_ALWAYS,
+                        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH, nullptr);
+    if (g_log == INVALID_HANDLE_VALUE) return 1;
+
+    const unsigned char bom[] = {0xEF,0xBB,0xBF};
+    RawWrite((const char*)bom, sizeof(bom), false);
+    LogEnvironment();
+
+    if (g_cfg.logExceptions) AddVectoredExceptionHandler(1, VectoredHandler);
+
+    int first = PatchLoadedModules();
+    Logf(true, "HOOK", "Initial IAT scan complete; patched %d imports", first);
+    Logf(true, "INIT", "Diagnostics armed. BEGIN without matching END can identify a call that never returned.");
+
+    while (WaitForSingleObject(g_stopEvent, g_cfg.moduleScanMs) == WAIT_TIMEOUT) {
+        PatchLoadedModules();
+    }
+
+    Logf(false, "INIT", "Diagnostics worker stopping");
+    FlushFileBuffers(g_log);
+    CloseHandle(g_log);
+    g_log = INVALID_HANDLE_VALUE;
+    return 0;
+}
+
+} // namespace diag
+
+BOOL WINAPI DllMain(HINSTANCE hinst, DWORD reason, LPVOID) {
+    using namespace diag;
+    if (reason == DLL_PROCESS_ATTACH) {
+        g_self = (HMODULE)hinst;
+        DisableThreadLibraryCalls(hinst);
+        g_stopEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        HANDLE th = CreateThread(nullptr, 0, WorkerThread, nullptr, 0, nullptr);
+        if (th) CloseHandle(th);
+    } else if (reason == DLL_PROCESS_DETACH) {
+        if (g_stopEvent) SetEvent(g_stopEvent);
+    }
+    return TRUE;
+}
