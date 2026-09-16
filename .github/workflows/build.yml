@@ -100,3 +100,25 @@ jobs:
             NFSTR_Diagnostics.ini
             tools/diagnostics/NFSTR_Diagnostics_v0.2.0.cpp
             tools/diagnostics/README_v0.2.0.txt
+
+      - name: Build EBX trace ASI v0.3.0
+        shell: bash
+        run: |
+          i686-w64-mingw32-g++ -shared -O2 -std=c++17 -Wall -Wextra \
+            -D_WIN32_WINNT=0x0601 -DWINVER=0x0601 \
+            tools/diagnostics/NFSTR_EBXTrace_v0.3.0.cpp \
+            -o NFSTR_EBXTrace.asi \
+            -lkernel32 \
+            -static-libgcc -static-libstdc++
+          file NFSTR_EBXTrace.asi
+          sha256sum NFSTR_EBXTrace.asi | tee NFSTR_EBXTrace.sha256.txt
+
+      - name: Upload EBX trace ASI v0.3.0
+        uses: actions/upload-artifact@v4
+        with:
+          name: NFSTR_EBXTrace-v0.3.0
+          path: |
+            NFSTR_EBXTrace.asi
+            NFSTR_EBXTrace.sha256.txt
+            tools/diagnostics/NFSTR_EBXTrace_v0.3.0.cpp
+            tools/diagnostics/README_EBXTrace_v0.3.0.txt
