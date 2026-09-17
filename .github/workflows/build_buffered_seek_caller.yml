@@ -1,0 +1,39 @@
+name: Build NFSTR Buffered Seek Caller
+
+on:
+  push:
+    branches: [internal-seek-caller-v0.1]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Install 32-bit MinGW-w64
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y g++-mingw-w64-i686
+      - name: Build Buffered Seek Caller v0.1.0
+        shell: bash
+        run: |
+          i686-w64-mingw32-g++ -shared -O2 -std=c++17 -Wall -Wextra \
+            -D_WIN32_WINNT=0x0601 -DWINVER=0x0601 \
+            tools/diagnostics/NFSTR_BufferedSeekCaller_v0.1.0.cpp \
+            -o NFSTR_BufferedSeekCaller.asi \
+            -lkernel32 \
+            -static-libgcc -static-libstdc++
+          file NFSTR_BufferedSeekCaller.asi
+          sha256sum NFSTR_BufferedSeekCaller.asi | tee NFSTR_BufferedSeekCaller.sha256.txt
+      - name: Upload Buffered Seek Caller
+        uses: actions/upload-artifact@v4
+        with:
+          name: NFSTR_BufferedSeekCaller-v0.1.0
+          path: |
+            NFSTR_BufferedSeekCaller.asi
+            NFSTR_BufferedSeekCaller.sha256.txt
+            tools/diagnostics/NFSTR_BufferedSeekCaller_v0.1.0.cpp
